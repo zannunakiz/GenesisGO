@@ -27,26 +27,29 @@ const (
 
 // Config contains validated runtime settings. Secret values must not be logged.
 type Config struct {
-	Environment         string
-	ListenAddress       string
-	DatabaseURL         string
-	NATSURL             string
-	WorkerConcurrency   int
-	RunTimeout          time.Duration
-	MaxEventsPerRun     int
-	MaxRequestBodyBytes int64
-	LogLevel            string
-	CORSOrigins         []string
-	APIKeysFile         string
-	APIKeysEnabled      bool
-	BootstrapKeyID      string
-	BootstrapScopes     []string
-	DemoAuthDisabled    bool
-	ArcjetEnabled       bool
-	ArcjetKey           string
-	OllamaURL           string
-	OllamaModel         string
-	TelemetryEndpoint   string
+	Environment             string
+	ListenAddress           string
+	DatabaseURL             string
+	NATSURL                 string
+	WorkerConcurrency       int
+	RunTimeout              time.Duration
+	MaxEventsPerRun         int
+	MaxRequestBodyBytes     int64
+	LogLevel                string
+	CORSOrigins             []string
+	APIKeysFile             string
+	APIKeysEnabled          bool
+	BootstrapKeyID          string
+	BootstrapScopes         []string
+	DemoAuthDisabled        bool
+	ArcjetEnabled           bool
+	ArcjetKey               string
+	ArcjetTrustedProxies    []string
+	ArcjetFallbackPerMinute int
+	ArcjetFailClosed        bool
+	OllamaURL               string
+	OllamaModel             string
+	TelemetryEndpoint       string
 }
 
 type lookup func(string) (string, bool)
@@ -159,6 +162,16 @@ func loadFrom(get lookup) (Config, error) {
 	} else {
 		cfg.ArcjetKey = ""
 	}
+	cfg.ArcjetTrustedProxies = parseTrustedProxies(value(get, "ARCJET_TRUSTED_PROXIES", ""))
+	fallbackLimit, err := positiveInt(get, "ARCJET_FALLBACK_PER_MINUTE", 120)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ArcjetFallbackPerMinute = fallbackLimit
+	cfg.ArcjetFailClosed, err = parseBool(get, "ARCJET_FAIL_CLOSED", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg.OllamaURL = value(get, "OLLAMA_URL", "")
 	if cfg.OllamaURL != "" {
@@ -246,6 +259,21 @@ func parseScopes(raw string) ([]string, error) {
 		return nil, errors.New("BOOTSTRAP_SCOPES must contain at least one scope")
 	}
 	return scopes, nil
+}
+
+func parseTrustedProxies(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func validateListenAddress(address string) error {

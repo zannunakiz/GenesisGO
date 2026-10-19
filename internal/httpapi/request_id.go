@@ -23,6 +23,8 @@ const (
 	CodeConflict             = "conflict"
 	CodeMethodNotAllowed     = "method_not_allowed"
 	CodeRequestTimeout       = "request_timeout"
+	CodeTooManyRequests      = "too_many_requests"
+	CodeServiceUnavailable   = "service_unavailable"
 	CodeInternal             = "internal_error"
 )
 

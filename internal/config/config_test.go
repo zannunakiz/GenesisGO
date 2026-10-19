@@ -36,6 +36,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.ArcjetEnabled || cfg.ArcjetKey != "" || cfg.OllamaURL != "" || cfg.OllamaModel != "" {
 		t.Fatal("optional Arcjet and AI settings should not be required by default")
 	}
+	if len(cfg.ArcjetTrustedProxies) != 0 || cfg.ArcjetFailClosed {
+		t.Fatal("optional Arcjet proxy and fail-closed settings should default to unset")
+	}
+	if cfg.ArcjetFallbackPerMinute != 120 {
+		t.Fatalf("unexpected Arcjet fallback default: %d", cfg.ArcjetFallbackPerMinute)
+	}
 	if len(cfg.CORSOrigins) != 1 || cfg.CORSOrigins[0] != "http://localhost:3000" {
 		t.Fatalf("unexpected CORS origins: %v", cfg.CORSOrigins)
 	}
@@ -156,22 +162,31 @@ func TestAuthProductionGuards(t *testing.T) {
 
 func TestValidOptionalServicesAndLimits(t *testing.T) {
 	cfg, err := from(map[string]string{
-		"WORKER_CONCURRENCY": "8",
-		"RUN_TIMEOUT":        "90s",
-		"MAX_EVENTS_PER_RUN": "2000",
-		"MAX_BODY_BYTES":     "2048",
-		"ARCJET_ENABLED":     "true",
-		"ARCJET_KEY":         "aj_prj_key_0123456789abcdef",
-		"OLLAMA_URL":         "http://127.0.0.1:11434",
-		"OLLAMA_MODEL":       "local-model",
-		"TELEMETRY_ENDPOINT": "http://127.0.0.1:4318",
-		"CORS_ORIGINS":       "http://localhost:3000, https://demo.example.test",
+		"WORKER_CONCURRENCY":         "8",
+		"RUN_TIMEOUT":                "90s",
+		"MAX_EVENTS_PER_RUN":         "2000",
+		"MAX_BODY_BYTES":             "2048",
+		"ARCJET_ENABLED":             "true",
+		"ARCJET_KEY":                 "aj_prj_key_0123456789abcdef",
+		"ARCJET_TRUSTED_PROXIES":     "10.0.0.1, 10.0.0.0/24",
+		"ARCJET_FALLBACK_PER_MINUTE": "60",
+		"ARCJET_FAIL_CLOSED":         "true",
+		"OLLAMA_URL":                 "http://127.0.0.1:11434",
+		"OLLAMA_MODEL":               "local-model",
+		"TELEMETRY_ENDPOINT":         "http://127.0.0.1:4318",
+		"CORS_ORIGINS":               "http://localhost:3000, https://demo.example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.ArcjetEnabled || cfg.ArcjetKey == "" || cfg.OllamaModel != "local-model" {
 		t.Fatal("configured optional service settings were not loaded")
+	}
+	if len(cfg.ArcjetTrustedProxies) != 2 || !cfg.ArcjetFailClosed {
+		t.Fatal("configured Arcjet proxy and fail-closed settings were not loaded")
+	}
+	if cfg.ArcjetFallbackPerMinute != 60 {
+		t.Fatal("configured Arcjet fallback limit was not loaded")
 	}
 	if cfg.WorkerConcurrency != 8 || cfg.RunTimeout != 90*time.Second || cfg.MaxEventsPerRun != 2000 || cfg.MaxRequestBodyBytes != 2048 {
 		t.Fatal("configured positive limits were not loaded")

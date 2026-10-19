@@ -15,6 +15,7 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/config"
 	"github.com/zannunakiz/GenesisGO/internal/httpapi"
 	"github.com/zannunakiz/GenesisGO/internal/observability"
+	"github.com/zannunakiz/GenesisGO/internal/protection"
 )
 
 func main() {
@@ -40,6 +41,21 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	guard, err := protection.New(protection.Settings{
+		Enabled:           cfg.ArcjetEnabled,
+		Key:               cfg.ArcjetKey,
+		TrustedProxies:    cfg.ArcjetTrustedProxies,
+		FallbackPerMinute: cfg.ArcjetFallbackPerMinute,
+		FailClosed:        cfg.ArcjetFailClosed,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = guard.Close(closeCtx)
+	}()
 
 	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
 	ready := httpapi.ReadyHandler(apiReadyDeps(cfg, startTime))
