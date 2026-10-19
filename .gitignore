@@ -17,14 +17,13 @@
 /**/node_modules/
 
 # Next.js
-/.next/
-/out/
-/build/
-/.next/
+.next/
+out/
+build/
 
 # Go build outputs
-/bin/
-/dist/
+bin/
+dist/
 *.exe
 *.exe~
 *.dll
@@ -36,10 +35,10 @@ coverage.out
 coverage.html
 
 # Frontend build and test outputs
-/coverage/
-/playwright-report/
-/test-results/
-/.nyc_output/
+coverage/
+playwright-report/
+test-results/
+.nyc_output/
 
 # Logs and temporary files
 *.log

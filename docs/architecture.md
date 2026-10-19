@@ -27,3 +27,7 @@ An invariant result identifies the rule, outcome (`passed`, `failed`, or `not_ev
 ## Non-goals and safety limits
 
 V1 is not a production message broker, payment processor, production replay service, or arbitrary consumer test runner. It does not accept or execute uploaded source, binaries, scripts, shell commands, Docker images, or container configurations, and does not connect scenarios to user production infrastructure. It does not require paid AI, hosted databases/brokers, Arcjet, or hosted observability for local non-AI scenarios. AI is advisory only; deterministic state and invariant evaluation are authoritative.
+
+## Development toolchain
+
+The Go module targets Go 1.27.0. This toolchain was resolved through Go's automatic toolchain download because only Go 1.25.6 was preinstalled. The latest Arcjet Go SDK checked for this workspace, v1.2.0, declares Go 1.25.0 and is compatible with Go 1.27.0.
