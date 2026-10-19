@@ -37,3 +37,7 @@ The Go module targets Go 1.27.0. This toolchain was resolved through Go's automa
 `internal/config` validates environment-driven runtime settings. For local development it reads `.env` if present, with process environment values taking precedence. Copy `.env.example` to `.env` and replace placeholders locally; `.env` is ignored and must not be committed. Arcjet defaults to disabled and requires a structurally valid `ARCJET_KEY` only when `ARCJET_ENABLED=true`. Ollama and telemetry are optional, and the default non-AI configuration does not contact either service.
 
 Production mode requires explicit listener, database, NATS, and CORS settings. Production database connections must require TLS, NATS must use TLS, CORS must use public HTTPS origins, and debug logging is rejected. Configuration errors identify the setting to fix without including configured values.
+
+## HTTP transport behaviour
+
+`internal/httpapi` centralises the JSON error envelope (`code`, `message`, `request_id`, optional field errors), content-type/body-size/JSON-shape validation, string/enum/list bounds, read/write/idle/handler timeouts, request-ID propagation, and panic recovery. Error responses use stable codes and safe messages; SQL errors, stack traces, and raw internal text are never serialised.
