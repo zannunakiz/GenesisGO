@@ -1,0 +1,114 @@
+
+# Local AI-agent planning files
+/prompt.md
+/Prompt.md
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.example.*
+!.env.*.example.*
+
+# Dependencies
+/node_modules/
+/**/node_modules/
+
+# Next.js
+/.next/
+/out/
+/build/
+/.next/
+
+# Go build outputs
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Frontend build and test outputs
+/coverage/
+/playwright-report/
+/test-results/
+/.nyc_output/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Local databases, dumps, and database state
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.gz
+*.backup
+
+# Local configuration and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+.local/
+
+# Ollama models and local AI data
+/models/
+/ollama-data/
+/ollama/
+
+# Observability and generated telemetry
+/traces/
+/telemetry-data/
+/prometheus-data/
+/grafana-data/
+/loki-data/
+/tempo-data/
+
+# Docker local overrides and persistent volumes
+docker-compose.override.yml
+docker-compose.*.local.yml
+/volumes/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Package manager and tool caches
+/.cache/
+.cache/
+.eslintcache
+.turbo/
+
+# Generated API documentation
+/swagger-ui/
+
+# Keep source-controlled project essentials:
+# - go.mod and go.sum
+# - package.json and package-lock.json
+# - database migrations
+# - tests and test fixtures
+# - .env.example
+# - GitHub Actions workflows
+# - Dockerfiles and the main Compose configuration
