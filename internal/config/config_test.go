@@ -115,6 +115,45 @@ func TestExistingLocalEnvironmentFileIsValid(t *testing.T) {
 	}
 }
 
+func TestAuthDefaults(t *testing.T) {
+	cfg, err := from(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.APIKeysEnabled || cfg.APIKeysFile != ".local/api-keys.json" {
+		t.Fatalf("API keys must be enabled locally with a file store: %+v", cfg)
+	}
+	if cfg.BootstrapKeyID != "local-admin" || len(cfg.BootstrapScopes) != 1 || cfg.BootstrapScopes[0] != "admin" {
+		t.Fatalf("unexpected bootstrap defaults: %+v", cfg)
+	}
+	if cfg.DemoAuthDisabled {
+		t.Fatal("demo bypass must default to disabled")
+	}
+}
+
+func TestAuthProductionGuards(t *testing.T) {
+	base := map[string]string{
+		"APP_ENV":      "production",
+		"LISTEN_ADDR":  "0.0.0.0:8080",
+		"DATABASE_URL": "postgres://db.internal:5432/genesisgo?sslmode=verify-full",
+		"NATS_URL":     "tls://nats.internal:4222",
+		"CORS_ORIGINS": "https://app.example.test",
+	}
+	for _, mutate := range []func(map[string]string){
+		func(v map[string]string) { v["API_KEYS_ENABLED"] = "false" },
+		func(v map[string]string) { v["DEMO_AUTH_DISABLED"] = "true" },
+	} {
+		values := make(map[string]string, len(base)+1)
+		for k, v := range base {
+			values[k] = v
+		}
+		mutate(values)
+		if _, err := from(values); err == nil {
+			t.Fatalf("expected production auth guard to fail for %v", values)
+		}
+	}
+}
+
 func TestValidOptionalServicesAndLimits(t *testing.T) {
 	cfg, err := from(map[string]string{
 		"WORKER_CONCURRENCY": "8",
@@ -176,6 +215,9 @@ func TestInvalidValuesAreActionableAndRedacted(t *testing.T) {
 		{"Arcjet key required", map[string]string{"ARCJET_ENABLED": "true"}, "ARCJET_KEY"},
 		{"Arcjet key format", map[string]string{"ARCJET_ENABLED": "true", "ARCJET_KEY": "invalid"}, "ARCJET_KEY"},
 		{"Arcjet key redaction", map[string]string{"ARCJET_ENABLED": "true", "ARCJET_KEY": secret}, "ARCJET_KEY"},
+		{"bootstrap key id", map[string]string{"BOOTSTRAP_KEY_ID": ""}, "BOOTSTRAP_KEY_ID"},
+		{"bootstrap scopes", map[string]string{"BOOTSTRAP_SCOPES": "owner"}, "BOOTSTRAP_SCOPES"},
+		{"bootstrap scopes empty", map[string]string{"BOOTSTRAP_SCOPES": "  "}, "BOOTSTRAP_SCOPES"},
 		{"Ollama URL", map[string]string{"OLLAMA_URL": "file:///tmp/model"}, "OLLAMA_URL"},
 		{"telemetry URL", map[string]string{"TELEMETRY_ENDPOINT": "localhost:4318"}, "TELEMETRY_ENDPOINT"},
 	}

@@ -36,6 +36,8 @@ The Go module targets Go 1.27.0. This toolchain was resolved through Go's automa
 
 `internal/config` validates environment-driven runtime settings. For local development it reads `.env` if present, with process environment values taking precedence. Copy `.env.example` to `.env` and replace placeholders locally; `.env` is ignored and must not be committed. Arcjet defaults to disabled and requires a structurally valid `ARCJET_KEY` only when `ARCJET_ENABLED=true`. Ollama and telemetry are optional, and the default non-AI configuration does not contact either service.
 
+Control-plane authentication uses API keys stored only as SHA-256 digests in `API_KEYS_FILE` (default `.local/api-keys.json`). There is no default production secret: create a local key with `go run ./cmd/bootstrap-key`, copy the one-time `GENESISGO_API_KEY` value, and keep it out of tracked files, logs, and reports. Keys carry `read`, `run`, or `admin` scopes (`admin` implies both, `run` implies `read`); missing or unknown keys return `401 unauthorized`, while a valid key without the required scope returns `403 forbidden`. `DEMO_AUTH_DISABLED=true` is a local-only escape hatch for read-only demo calls and is rejected in production, as is `API_KEYS_ENABLED=false`. Production startup also refuses to run when the key file contains no usable keys.
+
 Production mode requires explicit listener, database, NATS, and CORS settings. Production database connections must require TLS, NATS must use TLS, CORS must use public HTTPS origins, and debug logging is rejected. Configuration errors identify the setting to fix without including configured values.
 
 ## HTTP transport behaviour

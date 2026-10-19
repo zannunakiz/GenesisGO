@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zannunakiz/GenesisGO/internal/auth"
 	"github.com/zannunakiz/GenesisGO/internal/config"
 	"github.com/zannunakiz/GenesisGO/internal/httpapi"
 	"github.com/zannunakiz/GenesisGO/internal/observability"
@@ -35,9 +36,15 @@ func run(ctx context.Context) error {
 	logger := observability.NewLogger(os.Stdout, level)
 	startTime := time.Now()
 
+	authStore, err := loadAuthStore(cfg)
+	if err != nil {
+		return err
+	}
+
 	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
 	ready := httpapi.ReadyHandler(apiReadyDeps(cfg, startTime))
 	mux := httpapi.NewMux(live, ready)
+	_ = authStore
 	handler := httpapi.RequestID(mux)
 	handler = httpapi.RequestLogger(logger)(handler)
 	handler = httpapi.Recover(handler)
@@ -89,4 +96,25 @@ func apiReadyDeps(cfg config.Config, startTime time.Time) httpapi.ReadyDeps {
 		ArcjetEnabled:      cfg.ArcjetEnabled,
 		AIConfigured:       cfg.OllamaURL != "" || cfg.OllamaModel != "",
 	}
+}
+
+// loadAuthStore opens the digest-only key file when authentication is
+// enabled. Control-plane routes added in later work share this store; the
+// API never loads plaintext secrets and never logs key material.
+func loadAuthStore(cfg config.Config) (auth.Store, error) {
+	if !cfg.APIKeysEnabled {
+		store, err := auth.NewMemoryStore()
+		if err != nil {
+			return nil, err
+		}
+		return store, nil
+	}
+	store, err := auth.NewFileStore(cfg.APIKeysFile)
+	if err != nil {
+		return nil, err
+	}
+	if len(store.List()) == 0 && cfg.Environment == "production" {
+		return nil, fmt.Errorf("no API keys are configured; bootstrap one before starting production")
+	}
+	return store, nil
 }

@@ -37,6 +37,11 @@ type Config struct {
 	MaxRequestBodyBytes int64
 	LogLevel            string
 	CORSOrigins         []string
+	APIKeysFile         string
+	APIKeysEnabled      bool
+	BootstrapKeyID      string
+	BootstrapScopes     []string
+	DemoAuthDisabled    bool
 	ArcjetEnabled       bool
 	ArcjetKey           string
 	OllamaURL           string
@@ -109,6 +114,37 @@ func loadFrom(get lookup) (Config, error) {
 	cfg.CORSOrigins, err = parseCORSOrigins(value(get, "CORS_ORIGINS", defaultCORSOrigins))
 	if err != nil {
 		return Config{}, err
+	}
+
+	cfg.APIKeysFile = strings.TrimSpace(value(get, "API_KEYS_FILE", ".local/api-keys.json"))
+	cfg.APIKeysEnabled, err = parseBool(get, "API_KEYS_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BootstrapKeyID = strings.TrimSpace(value(get, "BOOTSTRAP_KEY_ID", "local-admin"))
+	if cfg.BootstrapKeyID == "" || len([]rune(cfg.BootstrapKeyID)) > 64 {
+		return Config{}, errors.New("BOOTSTRAP_KEY_ID must be 1-64 characters")
+	}
+	rawScopes := strings.TrimSpace(value(get, "BOOTSTRAP_SCOPES", "admin"))
+	if rawScopes == "" {
+		return Config{}, errors.New("BOOTSTRAP_SCOPES must contain at least one scope")
+	}
+	cfg.BootstrapScopes, err = parseScopes(rawScopes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.DemoAuthDisabled, err = parseBool(get, "DEMO_AUTH_DISABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	if !cfg.APIKeysEnabled && cfg.Environment == "production" {
+		return Config{}, errors.New("API_KEYS_ENABLED must be true in production")
+	}
+	if cfg.DemoAuthDisabled && cfg.Environment == "production" {
+		return Config{}, errors.New("DEMO_AUTH_DISABLED must be false in production")
+	}
+	if cfg.APIKeysEnabled && strings.TrimSpace(cfg.APIKeysFile) == "" {
+		return Config{}, errors.New("API_KEYS_FILE must be set when API_KEYS_ENABLED is true")
 	}
 
 	cfg.ArcjetEnabled, err = parseBool(get, "ARCJET_ENABLED", false)
@@ -188,6 +224,28 @@ func parseBool(get lookup, key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return v, nil
+}
+
+func parseScopes(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	scopes := make([]string, 0, len(parts))
+	seen := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		scope := strings.ToLower(strings.TrimSpace(part))
+		switch scope {
+		case "read", "run", "admin":
+		default:
+			return nil, errors.New("BOOTSTRAP_SCOPES must contain only read, run, or admin")
+		}
+		if !seen[scope] {
+			seen[scope] = true
+			scopes = append(scopes, scope)
+		}
+	}
+	if len(scopes) == 0 {
+		return nil, errors.New("BOOTSTRAP_SCOPES must contain at least one scope")
+	}
+	return scopes, nil
 }
 
 func validateListenAddress(address string) error {

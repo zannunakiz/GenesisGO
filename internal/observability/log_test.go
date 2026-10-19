@@ -97,6 +97,8 @@ func TestLogRedactedNeverWritesSecretValues(t *testing.T) {
 		"marker-api-key-002",
 		"marker-cookie-003",
 		"marker-card-4111111111111111",
+		"gg_marker-bootstrap-secret-004",
+		"GENESISGO_API_KEY=gg_marker-bootstrap-secret-004",
 	}
 	LogRedacted(logger, ctx, slog.LevelInfo, "request completed",
 		slog.String("method", "POST"),
@@ -104,6 +106,8 @@ func TestLogRedactedNeverWritesSecretValues(t *testing.T) {
 		slog.String("X-Api-Key", markers[1]),
 		slog.String("Cookie", markers[2]),
 		slog.String("card_number", markers[3]),
+		slog.String("GENESISGO_API_KEY", markers[4]),
+		slog.String("api_key", markers[5]),
 		slog.String("request_id", "req-secret-check"),
 	)
 

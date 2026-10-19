@@ -85,6 +85,23 @@ func RequestTimeout(w http.ResponseWriter, r *http.Request, message string) {
 	WriteError(w, r, http.StatusServiceUnavailable, CodeRequestTimeout, message, nil)
 }
 
+// Unauthorized renders a stable authentication error without revealing
+// whether a key ID exists or which scope was missing.
+func Unauthorized(w http.ResponseWriter, r *http.Request, message string) {
+	if message == "" {
+		message = "Authentication is required."
+	}
+	WriteError(w, r, http.StatusUnauthorized, CodeUnauthorized, message, nil)
+}
+
+// Forbidden renders a stable authorization error for insufficient scope.
+func Forbidden(w http.ResponseWriter, r *http.Request, message string) {
+	if message == "" {
+		message = "This API key does not have the required scope."
+	}
+	WriteError(w, r, http.StatusForbidden, CodeForbidden, message, nil)
+}
+
 // Internal renders a generic failure without exposing internal details.
 // The caller-provided err is intentionally not serialized.
 func Internal(w http.ResponseWriter, r *http.Request, err error) {

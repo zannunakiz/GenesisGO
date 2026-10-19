@@ -130,14 +130,16 @@ func CorrelationMetadata(ctx context.Context) map[string]string {
 
 // sensitiveKeySubstrings marks attribute names whose values must not be logged.
 // Matching is case-insensitive substring matching so variants such as
-// X-Api-Key, access_token, or card_number are covered without allowlisting
-// every header or payload spelling.
+// X-Api-Key, GENESISGO_API_KEY, access_token, or card_number are covered
+// without allowlisting every header or payload spelling.
 var sensitiveKeySubstrings = []string{
 	"authorization",
 	"proxy-authorization",
 	"api_key",
 	"apikey",
 	"api-key",
+	"genesisgo_api_key",
+	"bootstrap_secret",
 	"access_token",
 	"refresh_token",
 	"auth_token",

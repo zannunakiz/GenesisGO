@@ -17,6 +17,8 @@ const (
 	CodeInvalidField         = "invalid_field"
 	CodeUnsupportedMediaType = "unsupported_media_type"
 	CodePayloadTooLarge      = "payload_too_large"
+	CodeUnauthorized         = "unauthorized"
+	CodeForbidden            = "forbidden"
 	CodeNotFound             = "not_found"
 	CodeConflict             = "conflict"
 	CodeMethodNotAllowed     = "method_not_allowed"
