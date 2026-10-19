@@ -2,6 +2,7 @@
 # Local AI-agent planning files
 /prompt.md
 /Prompt.md
+/copaste.txt
 
 # Environment variables and secrets
 .env
