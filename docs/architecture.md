@@ -31,3 +31,9 @@ V1 is not a production message broker, payment processor, production replay serv
 ## Development toolchain
 
 The Go module targets Go 1.27.0. This toolchain was resolved through Go's automatic toolchain download because only Go 1.25.6 was preinstalled. The latest Arcjet Go SDK checked for this workspace, v1.2.0, declares Go 1.25.0 and is compatible with Go 1.27.0.
+
+## Runtime configuration
+
+`internal/config` validates environment-driven runtime settings. For local development it reads `.env` if present, with process environment values taking precedence. Copy `.env.example` to `.env` and replace placeholders locally; `.env` is ignored and must not be committed. Arcjet defaults to disabled and requires a structurally valid `ARCJET_KEY` only when `ARCJET_ENABLED=true`. Ollama and telemetry are optional, and the default non-AI configuration does not contact either service.
+
+Production mode requires explicit listener, database, NATS, and CORS settings. Production database connections must require TLS, NATS must use TLS, CORS must use public HTTPS origins, and debug logging is rejected. Configuration errors identify the setting to fix without including configured values.
