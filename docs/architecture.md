@@ -40,6 +40,6 @@ Production mode requires explicit listener, database, NATS, and CORS settings. P
 
 ## HTTP transport behaviour
 
-`internal/httpapi` centralises the JSON error envelope (`code`, `message`, `request_id`, optional field errors), content-type/body-size/JSON-shape validation, string/enum/list bounds, read/write/idle/handler timeouts, request-ID propagation, and panic recovery. Error responses use stable codes and safe messages; SQL errors, stack traces, and raw internal text are never serialised.
+`internal/httpapi` centralises the JSON error envelope (`code`, `message`, `request_id`, optional field errors), content-type/body-size/JSON-shape validation, string/enum/list bounds, read/write/idle/handler timeouts, liveness/readiness health endpoints, request-ID propagation, and panic recovery. Error responses use stable codes and safe messages; SQL errors, stack traces, and raw internal text are never serialised.
 
-`internal/observability` provides JSON logging, request/run correlation helpers, and the central redaction policy. Request logs record method, path, status, duration, and correlation identifiers only; auth headers, API keys, cookies, secrets, connection strings, and raw payment fields are replaced with a fixed placeholder.
+`internal/observability` provides JSON logging, request/run correlation helpers, and the central redaction policy. Request logs record method, path, status, duration, and correlation identifiers only; auth headers, API keys, cookies, secrets, connection strings, and raw payment fields are replaced with a fixed placeholder. API shutdown cancels active run work, checkpoints terminal state without ever marking interrupted runs as passed, then closes HTTP, database, broker, and telemetry resources in bounded order.

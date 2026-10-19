@@ -3,14 +3,29 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zannunakiz/GenesisGO/internal/observability"
 )
+
+func readAll(t *testing.T, res *http.Response) []byte {
+	t.Helper()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func fixedTime(start time.Time, offset time.Duration) func() time.Time {
+	return func() time.Time { return start.Add(offset) }
+}
 
 func TestRequestLoggerEmitsJSONWithCorrelationID(t *testing.T) {
 	var buf bytes.Buffer
