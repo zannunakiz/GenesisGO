@@ -31,3 +31,19 @@ V1 is not a production message broker, payment processor, production replay serv
 ## Development toolchain
 
 The Go module targets Go 1.27.0. This toolchain was resolved through Go's automatic toolchain download because only Go 1.25.6 was preinstalled. The latest Arcjet Go SDK checked for this workspace, v1.2.0, declares Go 1.25.0 and is compatible with Go 1.27.0.
+
+## Runtime configuration
+
+`internal/config` validates environment-driven runtime settings. For local development it reads `.env` if present, with process environment values taking precedence. Copy `.env.example` to `.env` and replace placeholders locally; `.env` is ignored and must not be committed. Arcjet defaults to disabled and requires a structurally valid `ARCJET_KEY` only when `ARCJET_ENABLED=true`. Ollama and telemetry are optional, and the default non-AI configuration does not contact either service.
+
+Control-plane authentication uses API keys stored only as SHA-256 digests in `API_KEYS_FILE` (default `.local/api-keys.json`). There is no default production secret: create a local key with `go run ./cmd/bootstrap-key`, copy the one-time `GENESISGO_API_KEY` value, and keep it out of tracked files, logs, and reports. Keys carry `read`, `run`, or `admin` scopes (`admin` implies both, `run` implies `read`); missing or unknown keys return `401 unauthorized`, while a valid key without the required scope returns `403 forbidden`. `DEMO_AUTH_DISABLED=true` is a local-only escape hatch for read-only demo calls and is rejected in production, as is `API_KEYS_ENABLED=false`. Production startup also refuses to run when the key file contains no usable keys.
+
+Optional Arcjet protection lives in `internal/protection`. `ARCJET_ENABLED=false` leaves the product working with local validation, auth, body limits, timeouts, and a documented per-process fallback limiter. When enabled, Shield plus a token-bucket rate limit guard abuse-sensitive routes; prompt-injection and sensitive-information checks are not applied on that path because it carries no AI-bound text. Missing or invalid hosted configuration fails startup, and provider errors fail closed only when `ARCJET_FAIL_CLOSED=true`. Protection never reports Arcjet as active when disabled. `ARCJET_TRUSTED_PROXIES` lists only reverse proxies allowed to supply `X-Forwarded-For`; all other forwarded headers are ignored.
+
+Production mode requires explicit listener, database, NATS, and CORS settings. Production database connections must require TLS, NATS must use TLS, CORS must use public HTTPS origins, and debug logging is rejected. Configuration errors identify the setting to fix without including configured values.
+
+## HTTP transport behaviour
+
+`internal/httpapi` centralises the JSON error envelope (`code`, `message`, `request_id`, optional field errors), content-type/body-size/JSON-shape validation, string/enum/list bounds, read/write/idle/handler timeouts, liveness/readiness health endpoints, request-ID propagation, and panic recovery. Error responses use stable codes and safe messages; SQL errors, stack traces, and raw internal text are never serialised.
+
+`internal/observability` provides JSON logging, request/run correlation helpers, and the central redaction policy. Request logs record method, path, status, duration, and correlation identifiers only; auth headers, API keys, cookies, secrets, connection strings, and raw payment fields are replaced with a fixed placeholder. API shutdown cancels active run work, checkpoints terminal state without ever marking interrupted runs as passed, then closes HTTP, database, broker, and telemetry resources in bounded order.
