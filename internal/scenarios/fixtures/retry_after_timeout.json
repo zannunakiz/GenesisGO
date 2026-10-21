@@ -1,0 +1,19 @@
+{
+  "key": "retry_after_timeout",
+  "version": 1,
+  "name": "Retry After Timeout",
+  "description": "A delivery times out and is retried to verify at-least-once semantics do not create duplicate business effects.",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-002", "payload": { "type": "payment", "aggregate_id": "order-200", "amount_cents": 2500, "currency": "USD", "idempotency_key": "pay-order-200" } },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-002", "attempt": 1, "fault": "retry" },
+    { "id": "delay-1", "type": "delay", "delay_ms": 500 },
+    { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-002", "attempt": 2 },
+    { "id": "ack-2", "type": "ack", "event_id": "evt-pay-002" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 25000, "concurrency": 1 },
+  "invariants": [
+    { "key": "no_duplicate_payment", "type": "no_duplicate_effect", "effect_type": "payment", "aggregate": "order-200" },
+    { "key": "idempotency_key_unique", "type": "idempotency_key_unique", "effect_type": "payment" }
+  ],
+  "seed": 99
+}

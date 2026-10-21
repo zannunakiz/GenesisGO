@@ -1,0 +1,20 @@
+{
+  "key": "out_of_order",
+  "version": 1,
+  "name": "Out-of-Order Delivery",
+  "description": "Events are delivered out of order to verify the consumer applies inventory transitions in the correct sequence.",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-inv-001", "payload": { "type": "inventory", "aggregate_id": "sku-500", "amount_cents": -5, "currency": "USD", "idempotency_key": "inv-sku-500-decrement" } },
+    { "id": "publish-2", "type": "publish", "event_id": "evt-inv-002", "payload": { "type": "inventory", "aggregate_id": "sku-500", "amount_cents": 10, "currency": "USD", "idempotency_key": "inv-sku-500-increment" } },
+    { "id": "deliver-2", "type": "deliver", "event_id": "evt-inv-002", "attempt": 1, "fault": "out_of_order" },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-inv-001", "attempt": 1 },
+    { "id": "ack-1", "type": "ack", "event_id": "evt-inv-001" },
+    { "id": "ack-2", "type": "ack", "event_id": "evt-inv-002" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 20000, "concurrency": 1 },
+  "invariants": [
+    { "key": "allowed_order_transition", "type": "allowed_order_transition", "aggregate": "sku-500" },
+    { "key": "no_negative_inventory", "type": "no_negative_inventory", "effect_type": "inventory", "aggregate": "sku-500" }
+  ],
+  "seed": 7
+}
