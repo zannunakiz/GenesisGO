@@ -38,6 +38,17 @@ FROM runs
 WHERE scenario_id = $1
 ORDER BY created_at DESC;
 
+-- name: RecordRejectedEvent :one
+INSERT INTO rejected_events (run_id, event_id, event_type, reason, envelope)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, run_id, event_id, event_type, reason, received_at, envelope;
+
+-- name: ListRejectedEventsByRun :many
+SELECT id, run_id, event_id, event_type, reason, received_at, envelope
+FROM rejected_events
+WHERE run_id = $1
+ORDER BY received_at ASC;
+
 -- name: CreateRunJob :one
 INSERT INTO run_jobs (run_id, job_type, status, payload)
 VALUES ($1, $2, $3, $4)
