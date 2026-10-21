@@ -19,10 +19,10 @@ ORDER BY created_at DESC;
 -- name: CreateRun :one
 INSERT INTO runs (scenario_id, status)
 VALUES ($1, $2)
-RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at;
+RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version;
 
 -- name: GetRun :one
-SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at
+SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 FROM runs
 WHERE id = $1;
 
@@ -30,10 +30,10 @@ WHERE id = $1;
 UPDATE runs
 SET status = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at;
+RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version;
 
 -- name: ListRunsByScenario :many
-SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at
+SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 FROM runs
 WHERE scenario_id = $1
 ORDER BY created_at DESC;

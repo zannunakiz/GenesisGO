@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // queryer is implemented by both *pgxpool.Pool and pgx.Tx, which lets the same
@@ -18,6 +19,7 @@ import (
 type queryer interface {
 	QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row
 	Query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error)
+	Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error)
 }
 
 // Model layer. All ID and JSONB fields are scanned into plain Go types so the
@@ -35,13 +37,17 @@ type Scenario struct {
 
 // Run is a single execution of a scenario.
 type Run struct {
-	ID           string     `json:"id"`
-	ScenarioID   string     `json:"scenario_id"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID             string     `json:"id"`
+	ScenarioID     string     `json:"scenario_id"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	FailureReason  *string    `json:"failure_reason,omitempty"`
+	CancellationReason *string `json:"cancellation_reason,omitempty"`
+	AttemptCount   int32      `json:"attempt_count"`
+	Version        int32      `json:"version"`
 }
 
 // RunJob is a bounded unit of work scheduled by the orchestrator for a run.
@@ -117,6 +123,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	if err := row.Scan(
 		&r.ID, &r.ScenarioID, &r.Status, &r.CreatedAt,
 		&r.StartedAt, &r.CompletedAt, &r.UpdatedAt,
+		&r.FailureReason, &r.CancellationReason, &r.AttemptCount, &r.Version,
 	); err != nil {
 		return nil, err
 	}
@@ -248,7 +255,7 @@ func CreateRun(ctx context.Context, q queryer, scenarioID, status string) (*Run,
 	const query = `
 		INSERT INTO runs (scenario_id, status)
 		VALUES ($1, $2)
-		RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at
+		RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 	`
 	row := q.QueryRow(ctx, query, scenarioID, status)
 	return scanRun(row)
@@ -261,7 +268,7 @@ func (s *Store) CreateRun(ctx context.Context, scenarioID, status string) (*Run,
 // GetRun returns a run by ID.
 func GetRun(ctx context.Context, q queryer, id string) (*Run, error) {
 	const query = `
-		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at
+		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 		FROM runs
 		WHERE id = $1
 	`
@@ -279,7 +286,7 @@ func UpdateRunStatus(ctx context.Context, q queryer, id, status string) (*Run, e
 		UPDATE runs
 		SET status = $2, updated_at = now()
 		WHERE id = $1
-		RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at
+		RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 	`
 	row := q.QueryRow(ctx, query, id, status)
 	return scanRun(row)
@@ -292,7 +299,7 @@ func (s *Store) UpdateRunStatus(ctx context.Context, id, status string) (*Run, e
 // ListRunsByScenario returns runs for a scenario, newest first.
 func ListRunsByScenario(ctx context.Context, q queryer, scenarioID string) ([]*Run, error) {
 	const query = `
-		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at
+		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 		FROM runs
 		WHERE scenario_id = $1
 		ORDER BY created_at DESC
