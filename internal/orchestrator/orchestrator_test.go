@@ -58,6 +58,7 @@ type fakeStore struct {
 	jobsByRun   map[string][]*store.RunJob
 	scenarios   map[string]*store.Scenario // key -> scenario
 	sideEffects map[string][]*store.SideEffectRecord
+	attempts    map[string][]*store.EventAttempt // run_id -> attempts
 	invariants  map[string][]*store.InvariantResult
 
 	// Claim behavior.
@@ -76,6 +77,7 @@ func newFakeStore() *fakeStore {
 		jobsByRun:   make(map[string][]*store.RunJob),
 		scenarios:   make(map[string]*store.Scenario),
 		sideEffects: make(map[string][]*store.SideEffectRecord),
+		attempts:    make(map[string][]*store.EventAttempt),
 		invariants:  make(map[string][]*store.InvariantResult),
 	}
 }
@@ -184,7 +186,33 @@ func (f *fakeStore) HeartbeatRunJob(ctx context.Context, jobID string, ttlSecond
 func (f *fakeStore) RecoverExpiredLeases(ctx context.Context) (int64, error) { return 0, nil }
 
 func (f *fakeStore) CreateEventAttempt(ctx context.Context, runID, eventID string, attemptNumber int32, deliveredAt time.Time, acknowledgedAt *time.Time, faultInjected *string) (*store.EventAttempt, error) {
-	return &store.EventAttempt{}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a := &store.EventAttempt{
+		ID:              fxID("attempt"),
+		RunID:           runID,
+		EventID:         eventID,
+		AttemptNumber:   attemptNumber,
+		DeliveredAt:     deliveredAt,
+		AcknowledgedAt:  acknowledgedAt,
+		FaultInjected:   faultInjected,
+		CreatedAt:       time.Now().UTC(),
+	}
+	f.attempts[runID] = append(f.attempts[runID], a)
+	return a, nil
+}
+
+// attemptsFor returns a run's attempts for one event, in record order.
+func (f *fakeStore) attemptsFor(runID, eventID string) []*store.EventAttempt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*store.EventAttempt
+	for _, a := range f.attempts[runID] {
+		if a.EventID == eventID {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func (f *fakeStore) CreateInvariantResult(ctx context.Context, runID, invariantKey, verdict string, details []byte) (*store.InvariantResult, error) {
@@ -205,6 +233,23 @@ func (f *fakeStore) ListSideEffectRecordsByRun(ctx context.Context, runID string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sideEffects[runID], nil
+}
+
+func (f *fakeStore) CreateSideEffectRecord(ctx context.Context, runID, effectType, aggregateID string, idempotencyKey *string, amountCents *int64, currency string) (*store.SideEffectRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := &store.SideEffectRecord{
+		ID:             fxID("effect"),
+		RunID:          runID,
+		EffectType:     effectType,
+		AggregateID:    aggregateID,
+		IdempotencyKey: idempotencyKey,
+		AmountCents:    amountCents,
+		Currency:       currency,
+		RecordedAt:     time.Now().UTC(),
+	}
+	f.sideEffects[runID] = append(f.sideEffects[runID], r)
+	return r, nil
 }
 
 func (f *fakeStore) ListRunJobsByRun(ctx context.Context, runID string) ([]*store.RunJob, error) {

@@ -24,7 +24,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/zannunakiz/GenesisGO/internal/broker"
-	"github.com/zannunakiz/GenesisGO/internal/delivery"
 	"github.com/zannunakiz/GenesisGO/internal/events"
 	"github.com/zannunakiz/GenesisGO/internal/invariants"
 	"github.com/zannunakiz/GenesisGO/internal/sampleconsumer"
@@ -511,15 +510,19 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 		return noopExecutor{}
 	}
 	return &defaultExecutor{
-		broker: o.cfg.Broker,
-		store:  o.cfg.Store,
-		sample: o.cfg.SampleConsumer,
-		log:    o.log,
+		broker:    o.cfg.Broker,
+		store:     o.cfg.Store,
+		sample:    o.cfg.SampleConsumer,
+		log:       o.log,
+		published: make(map[string][]byte),
 	}
 }
 
 // evaluateAndRecord builds run evidence from persisted side-effect records,
-// evaluates every invariant, and records one invariant result per rule.
+// evaluates the invariants declared by the scenario, and records one invariant
+// result per declared rule. Rules not declared by the scenario are skipped so
+// unrelated defaults (e.g. no_duplicate_effect for an inventory-only scenario)
+// cannot cause a spurious failure.
 func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
 	effects, err := o.cfg.Store.ListSideEffectRecordsByRun(ctx, runID)
 	if err != nil {
@@ -538,8 +541,22 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 			RecordedAt:     e.RecordedAt,
 		})
 	}
+
+	// Only invariants declared by the scenario are evaluated for this run.
+	// Map each rule key to the scenario's invariant key so results are
+	// recorded under the scenario's key (e.g. "no_duplicate_payment" rather
+	// than the rule's "no_duplicate_effect").
+	ruleToScenarioKey := make(map[string]string, len(scenario.Invariants))
+	for _, inv := range scenario.Invariants {
+		ruleToScenarioKey[inv.Type] = inv.Key
+	}
+
 	results := o.cfg.Invariants.EvaluateAll(ctx, invariants.Evidence{RunID: runID, Effects: ev})
 	for _, r := range results {
+		scenarioKey, ok := ruleToScenarioKey[r.InvariantKey]
+		if !ok {
+			continue // rule not declared by this scenario
+		}
 		details, merr := json.Marshal(map[string]any{
 			"rule":     r.Rule,
 			"expected": r.Expected,
@@ -549,11 +566,10 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 		if merr != nil {
 			return merr
 		}
-		if _, err := o.cfg.Store.CreateInvariantResult(ctx, runID, r.InvariantKey, string(r.Status), details); err != nil {
+		if _, err := o.cfg.Store.CreateInvariantResult(ctx, runID, scenarioKey, string(r.Status), details); err != nil {
 			return err
 		}
 	}
-	_ = scenario
 	return nil
 }
 
@@ -581,9 +597,14 @@ type noopExecutor struct{}
 
 func (noopExecutor) Execute(context.Context, string, *scenarios.Scenario) error { return nil }
 
-// defaultExecutor runs scenario steps against the NATS JetStream broker, the
-// delivery layer, and the sample consumer. It is used when no custom executor
-// is injected.
+// defaultExecutor runs scenario steps against the NATS JetStream broker and
+// the sample consumer. It is used when no custom executor is injected.
+//
+// Delivery is plan-driven: publish steps stage an event on the run's subject
+// and cache its payload; deliver steps apply the event to the sample consumer
+// in plan order and record every attempt. This makes duplicate and
+// out-of-order delivery reproducible from the scenario plan instead of
+// transport timing.
 type defaultExecutor struct {
 	broker broker.Broker
 	store  RunStore
@@ -591,16 +612,11 @@ type defaultExecutor struct {
 	log    *slog.Logger
 	mu     sync.Mutex
 	fault  *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
+	published map[string][]byte // event_id -> payload staged by publish steps
 }
 
 // Execute runs every step of scenario for runID.
 func (e *defaultExecutor) Execute(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
-	// Ensure a delivery consumer is subscribed to this run's subject so
-	// published events are delivered to the sample consumer.
-	if err := e.subscribe(ctx, runID); err != nil {
-		return fmt.Errorf("subscribe: %w", err)
-	}
-
 	for _, step := range scenario.Steps {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -621,23 +637,6 @@ func (e *defaultExecutor) Execute(ctx context.Context, runID string, scenario *s
 
 func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenarios.Step) error {
 	switch step.Type {
-	case "publish":
-		payload, merr := json.Marshal(step.Payload)
-		if merr != nil {
-			return merr
-		}
-		pub, err := delivery.NewPublisher(delivery.Config{
-			Broker:   e.broker,
-			Recorder: e.store,
-			RunID:    runID,
-			Logger:   e.log,
-		})
-		if err != nil {
-			return fmt.Errorf("new publisher: %w", err)
-		}
-		if err := pub.Publish(ctx, step.EventID, payload); err != nil {
-			return fmt.Errorf("publish: %w", err)
-		}
 	case "delay":
 		if step.DelayMs > 0 {
 			select {
@@ -656,48 +655,141 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 		e.mu.Lock()
 		e.fault = nil
 		e.mu.Unlock()
-		if err := e.subscribe(ctx, runID); err != nil {
-			return fmt.Errorf("restart subscribe: %w", err)
+	case "publish":
+		// Stage the event on the run's subject and cache its payload so
+		// deliver steps can replay the original event ID in plan order.
+		payload, merr := json.Marshal(step.Payload)
+		if merr != nil {
+			return merr
 		}
-	case "deliver", "ack":
-		// Delivery and acknowledgement are handled by the subscribed delivery
-		// consumer; nothing to do here.
+		if err := e.broker.Publish(ctx, runID, payload); err != nil {
+			return fmt.Errorf("publish: %w", err)
+		}
+		e.mu.Lock()
+		e.published[step.EventID] = append([]byte{}, payload...)
+		e.mu.Unlock()
+	case "deliver":
+		// Apply the event to the sample consumer now, in plan order. This is
+		// what makes duplicate and out-of-order delivery deterministic: the
+		// scenario plan, not the transport, decides which event is delivered
+		// when and how many times.
+		if err := e.deliverEvent(ctx, runID, step); err != nil {
+			return err
+		}
+	case "ack":
+		// A successful deliver already acknowledged the message. An ack step
+		// without a preceding deliver is a plan no-op.
 	default:
 		return fmt.Errorf("unknown step type %q", step.Type)
 	}
 	return nil
 }
 
-func (e *defaultExecutor) subscribe(ctx context.Context, runID string) error {
-	consumer, err := delivery.NewConsumer(delivery.Config{
-		Broker:      e.broker,
-		Recorder:    e.store,
-		RunID:       runID,
-		MaxAttempts: 5,
-		Logger:      e.log,
-	})
-	if err != nil {
-		return fmt.Errorf("new consumer: %w", err)
+// deliverEvent applies one planned delivery to the sample consumer. The
+// payload is the one staged by the matching publish step, so the original
+// event ID travels with every attempt of the event. Every attempt is recorded
+// durably with its number and any scenario-injected fault.
+func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step scenarios.Step) error {
+	e.mu.Lock()
+	f := e.fault
+	if f != nil && (f.EventID == "" || f.EventID == step.EventID) {
+		e.fault = nil // one-shot fault
 	}
-	handler := func(ctx context.Context, subject string, env *events.EventEnvelope, attempt int32, ack delivery.Ack) error {
-		e.mu.Lock()
-		f := e.fault
-		if f != nil && (f.EventID == "" || f.EventID == env.EventID) {
-			e.fault = nil // one-shot
-		}
-		e.mu.Unlock()
-		if f != nil {
-			// Simulated worker crash: return an error without applying the
-			// business effect, so the message is negatively acknowledged and
-			// may be redelivered after recovery.
-			return errors.New("simulated consumer worker crash")
-		}
-		if _, err := e.sample.ProcessEvent(ctx, env); err != nil {
+	e.mu.Unlock()
+
+	if f != nil {
+		// Simulated worker crash: the event is not applied and not
+		// acknowledged, so the run records the failed delivery instead of a
+		// fake pass.
+		if err := e.recordAttempt(ctx, runID, step, time.Now().UTC(), nil); err != nil {
 			return err
 		}
-		return nil
+		return errors.New("simulated consumer worker crash")
 	}
-	return consumer.Consume(ctx, handler)
+
+	payload, ok := e.published[step.EventID]
+	if !ok {
+		return fmt.Errorf("deliver step %q references unknown event %q", step.ID, step.EventID)
+	}
+	var payloadMap map[string]any
+	if err := json.Unmarshal(payload, &payloadMap); err != nil {
+		return fmt.Errorf("unmarshal payload: %w", err)
+	}
+	eventType, err := eventTypeFromPayload(payloadMap)
+	if err != nil {
+		return err
+	}
+	raw := payload
+	env := &events.EventEnvelope{
+		EventID:       step.EventID,
+		EventType:     eventType,
+		SchemaVersion: events.SchemaVersion,
+		OccurredAt:    time.Now().UTC(),
+		RunID:         runID,
+		Payload:       raw,
+	}
+	if err := events.Validate(env); err != nil {
+		return fmt.Errorf("validate envelope: %w", err)
+	}
+
+	record, perr := e.sample.ProcessEvent(ctx, env)
+	deliveredAt := time.Now().UTC()
+	if perr != nil {
+		// Processing failed: record the attempt without an acknowledgement
+		// and surface the error so the run does not pass on a broken step.
+		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil); err != nil {
+			return fmt.Errorf("record failed attempt: %w", err)
+		}
+		if record != nil {
+			_ = record.ID
+		}
+		return fmt.Errorf("process event %q: %w", step.EventID, perr)
+	}
+	_ = record
+	acknowledgedAt := deliveredAt
+	if err := e.recordAttempt(ctx, runID, step, deliveredAt, &acknowledgedAt); err != nil {
+		return err
+	}
+	return nil
+}
+
+// recordAttempt persists one delivery attempt for a scenario step. Attempts
+// default to 1 when the step carries no attempt number. faultInjected is set
+// from the step's fault so the timeline shows which deliveries were
+// scenario-induced anomalies.
+func (e *defaultExecutor) recordAttempt(
+	ctx context.Context,
+	runID string,
+	step scenarios.Step,
+	deliveredAt time.Time,
+	acknowledgedAt *time.Time,
+) error {
+	attempt := step.Attempt
+	if attempt <= 0 {
+		attempt = 1
+	}
+	var fault *string
+	if step.Fault != "" {
+		fault = &step.Fault
+	}
+	if _, err := e.store.CreateEventAttempt(ctx, runID, step.EventID, int32(attempt), deliveredAt, acknowledgedAt, fault); err != nil {
+		return fmt.Errorf("record attempt: %w", err)
+	}
+	return nil
+}
+
+// eventTypeFromPayload maps the synthetic business payload type to the
+// envelope event type used for transport validation.
+func eventTypeFromPayload(payload map[string]any) (events.EventType, error) {
+	t, _ := payload["type"].(string)
+	switch t {
+	case "payment.succeeded":
+		return events.EventTypePayment, nil
+	case "inventory.adjusted":
+		return events.EventTypeInventory, nil
+	default:
+		return "", fmt.Errorf("unsupported event type %q in payload", t)
+	}
 }
 
 func (e *defaultExecutor) waitForEffects(ctx context.Context, runID string) error {
