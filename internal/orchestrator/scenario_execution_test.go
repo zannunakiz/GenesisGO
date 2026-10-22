@@ -407,3 +407,222 @@ func TestDeliverUnknownEventFailsRun(t *testing.T) {
 	}
 	assertRunStatus(t, st, run.ID, string(store.RunStateFailed))
 }
+
+const retryAfterTimeoutFixture = `{
+  "key": "retry_after_timeout",
+  "version": 1,
+  "name": "Retry After Timeout",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-002", "payload": { "type": "payment.succeeded", "aggregate_id": "order-200", "amount_cents": 2500, "currency": "USD", "idempotency_key": "pay-order-200" } },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-002", "attempt": 1, "fault": "retry" },
+    { "id": "delay-1", "type": "delay", "delay_ms": 500 },
+    { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-002", "attempt": 2 },
+    { "id": "ack-2", "type": "ack", "event_id": "evt-pay-002" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 25000, "concurrency": 1 },
+  "invariants": [
+    { "key": "no_duplicate_payment", "type": "no_duplicate_effect", "effect_type": "payment", "aggregate": "order-200" },
+    { "key": "idempotency_key_unique", "type": "idempotency_key_unique", "effect_type": "payment" }
+  ],
+  "seed": 99
+}`
+
+const crashAfterCommitBeforeAckFixture = `{
+  "key": "crash_after_commit_before_ack",
+  "version": 1,
+  "name": "Crash After Commit Before Ack",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-004", "payload": { "type": "payment.succeeded", "aggregate_id": "order-400", "amount_cents": 750, "currency": "USD", "idempotency_key": "pay-order-400" } },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-004", "attempt": 1 },
+    { "id": "crash-1", "type": "crash", "fault": "crash_after_commit" },
+    { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-004", "attempt": 2 },
+    { "id": "ack-2", "type": "ack", "event_id": "evt-pay-004" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 20000, "concurrency": 1 },
+  "invariants": [
+    { "key": "no_duplicate_payment", "type": "no_duplicate_effect", "effect_type": "payment", "aggregate": "order-400" },
+    { "key": "idempotency_key_unique", "type": "idempotency_key_unique", "effect_type": "payment" }
+  ],
+  "seed": 1337
+}`
+
+const workerRestartFixture = `{
+  "key": "worker_restart",
+  "version": 1,
+  "name": "Worker Restart",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-003", "payload": { "type": "payment.succeeded", "aggregate_id": "order-300", "amount_cents": 500, "currency": "USD", "idempotency_key": "pay-order-300" } },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-003", "attempt": 1 },
+    { "id": "restart-1", "type": "restart" },
+    { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-003", "attempt": 2 },
+    { "id": "ack-2", "type": "ack", "event_id": "evt-pay-003" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 20000, "concurrency": 1 },
+  "invariants": [
+    { "key": "no_duplicate_payment", "type": "no_duplicate_effect", "effect_type": "payment", "aggregate": "order-300" },
+    { "key": "idempotency_key_unique", "type": "idempotency_key_unique", "effect_type": "payment" }
+  ],
+  "seed": 2024
+}`
+
+// attemptFaults returns the fault_injected value for a run's attempts of one
+// event, in record order (empty string when no fault was injected).
+func attemptFaults(t *testing.T, st *fakeStore, runID, eventID string) []string {
+	t.Helper()
+	var out []string
+	for _, a := range st.attemptsFor(runID, eventID) {
+		if a.FaultInjected != nil {
+			out = append(out, *a.FaultInjected)
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out
+}
+
+func TestRetryAfterTimeoutAppliesEffectOnce(t *testing.T) {
+	o, st, fb := newScenarioExecutor(t, sampleconsumer.ModeSafe, retryAfterTimeoutFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "retry_after_timeout")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	if got := fb.publishedCount(run.ID); got != 1 {
+		t.Fatalf("expected 1 published event, got %d", got)
+	}
+
+	effects, err := st.ListSideEffectRecordsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list side effects: %v", err)
+	}
+	if len(effects) != 1 {
+		t.Fatalf("expected exactly 1 payment effect, got %d", len(effects))
+	}
+	if effects[0].AggregateID != "order-200" || *effects[0].AmountCents != 2500 {
+		t.Fatalf("unexpected effect: %+v", effects[0])
+	}
+
+	attempts := st.attemptsFor(run.ID, "evt-pay-002")
+	if len(attempts) != 2 {
+		t.Fatalf("expected exactly 2 delivery attempts, got %d", len(attempts))
+	}
+	if attempts[0].AttemptNumber != 1 || attempts[0].AcknowledgedAt != nil {
+		t.Fatalf("attempt 1 should be unacked retryable failure, got %+v", attempts[0])
+	}
+	if attempts[0].FaultInjected == nil || *attempts[0].FaultInjected != "retry" {
+		t.Fatalf("expected attempt 1 fault_injected=retry, got %v", attempts[0].FaultInjected)
+	}
+	if attempts[1].AttemptNumber != 2 || attempts[1].AcknowledgedAt == nil {
+		t.Fatalf("attempt 2 should be acked redelivery, got %+v", attempts[1])
+	}
+
+	if got := invariantVerdict(t, st, run.ID, "no_duplicate_payment"); got != "pass" {
+		t.Fatalf("expected no_duplicate_payment to pass, got %q", got)
+	}
+	if got := invariantVerdict(t, st, run.ID, "idempotency_key_unique"); got != "pass" {
+		t.Fatalf("expected idempotency_key_unique to pass, got %q", got)
+	}
+}
+
+func TestCrashAfterCommitBeforeAckRedeliversCommittedEvent(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, crashAfterCommitBeforeAckFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "crash_after_commit_before_ack")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	effects, err := st.ListSideEffectRecordsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list side effects: %v", err)
+	}
+	if len(effects) != 1 {
+		t.Fatalf("expected exactly 1 payment effect, got %d", len(effects))
+	}
+	if effects[0].AggregateID != "order-400" {
+		t.Fatalf("unexpected effect: %+v", effects[0])
+	}
+
+	attempts := st.attemptsFor(run.ID, "evt-pay-004")
+	if len(attempts) != 2 {
+		t.Fatalf("expected exactly 2 delivery attempts, got %d", len(attempts))
+	}
+	if attempts[0].AttemptNumber != 1 || attempts[0].AcknowledgedAt == nil {
+		t.Fatalf("attempt 1 should be committed and acked, got %+v", attempts[0])
+	}
+	if attempts[1].AttemptNumber != 2 || attempts[1].AcknowledgedAt != nil {
+		t.Fatalf("attempt 2 crashed before ack, got %+v", attempts[1])
+	}
+	if attempts[1].FaultInjected == nil || *attempts[1].FaultInjected != "crash_after_commit" {
+		t.Fatalf("expected attempt 2 fault_injected=crash_after_commit, got %v", attempts[1].FaultInjected)
+	}
+
+	if got := invariantVerdict(t, st, run.ID, "no_duplicate_payment"); got != "pass" {
+		t.Fatalf("expected no_duplicate_payment to pass, got %q", got)
+	}
+	if got := invariantVerdict(t, st, run.ID, "idempotency_key_unique"); got != "pass" {
+		t.Fatalf("expected idempotency_key_unique to pass, got %q", got)
+	}
+}
+
+func TestWorkerRestartRecoversWithoutDuplicate(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, workerRestartFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "worker_restart")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	effects, err := st.ListSideEffectRecordsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list side effects: %v", err)
+	}
+	if len(effects) != 1 {
+		t.Fatalf("expected exactly 1 payment effect, got %d", len(effects))
+	}
+	if effects[0].AggregateID != "order-300" || *effects[0].AmountCents != 500 {
+		t.Fatalf("unexpected effect: %+v", effects[0])
+	}
+
+	attempts := st.attemptsFor(run.ID, "evt-pay-003")
+	if len(attempts) != 2 {
+		t.Fatalf("expected exactly 2 delivery attempts, got %d", len(attempts))
+	}
+	for _, a := range attempts {
+		if a.AcknowledgedAt == nil {
+			t.Fatalf("expected both attempts acknowledged after restart recovery, got %+v", a)
+		}
+		if a.FaultInjected != nil {
+			t.Fatalf("expected no injected fault after restart, got %v", a.FaultInjected)
+		}
+	}
+
+	if got := invariantVerdict(t, st, run.ID, "no_duplicate_payment"); got != "pass" {
+		t.Fatalf("expected no_duplicate_payment to pass, got %q", got)
+	}
+	if got := invariantVerdict(t, st, run.ID, "idempotency_key_unique"); got != "pass" {
+		t.Fatalf("expected idempotency_key_unique to pass, got %q", got)
+	}
+}

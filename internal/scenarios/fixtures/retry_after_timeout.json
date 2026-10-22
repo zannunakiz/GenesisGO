@@ -4,7 +4,7 @@
   "name": "Retry After Timeout",
   "description": "A delivery times out and is retried to verify at-least-once semantics do not create duplicate business effects.",
   "steps": [
-    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-002", "payload": { "type": "payment", "aggregate_id": "order-200", "amount_cents": 2500, "currency": "USD", "idempotency_key": "pay-order-200" } },
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-002", "payload": { "type": "payment.succeeded", "aggregate_id": "order-200", "amount_cents": 2500, "currency": "USD", "idempotency_key": "pay-order-200" } },
     { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-002", "attempt": 1, "fault": "retry" },
     { "id": "delay-1", "type": "delay", "delay_ms": 500 },
     { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-002", "attempt": 2 },

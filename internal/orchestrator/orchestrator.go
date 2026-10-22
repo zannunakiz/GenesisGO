@@ -646,10 +646,16 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 			}
 		}
 	case "crash":
-		// Inject a one-shot failure for the next matching delivery, simulating
-		// a consumer worker crashing while processing an event.
+		// Inject a one-shot failure for the next matching delivery. The fault
+		// type is taken from the step's fault field (default "crash") so a
+		// crash step can declare e.g. crash_after_commit. The fault is applied
+		// to the next matching delivery by deliverEvent.
+		faultType := step.Fault
+		if faultType == "" {
+			faultType = "crash"
+		}
 		e.mu.Lock()
-		e.fault = &sampleconsumer.Fault{Type: "crash", EventID: step.EventID}
+		e.fault = &sampleconsumer.Fault{Type: faultType, EventID: step.EventID}
 		e.mu.Unlock()
 	case "restart":
 		e.mu.Lock()
@@ -689,7 +695,15 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 // payload is the one staged by the matching publish step, so the original
 // event ID travels with every attempt of the event. Every attempt is recorded
 // durably with its number and any scenario-injected fault.
+//
+// Scenario-controlled faults declared on the step (or injected by a preceding
+// "crash" step via e.fault) are expected plan events, not random failures:
+// they are recorded as attempts and execution continues so the scenario can
+// demonstrate redelivery, restart, and crash recovery deterministically.
 func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step scenarios.Step) error {
+	// Determine the active fault for this delivery. A fault declared directly
+	// on the deliver step takes precedence over a one-shot executor fault set
+	// by a preceding "crash" step.
 	e.mu.Lock()
 	f := e.fault
 	if f != nil && (f.EventID == "" || f.EventID == step.EventID) {
@@ -697,16 +711,12 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	}
 	e.mu.Unlock()
 
-	if f != nil {
-		// Simulated worker crash: the event is not applied and not
-		// acknowledged, so the run records the failed delivery instead of a
-		// fake pass.
-		if err := e.recordAttempt(ctx, runID, step, time.Now().UTC(), nil); err != nil {
-			return err
-		}
-		return errors.New("simulated consumer worker crash")
+	activeFault := step.Fault
+	if activeFault == "" && f != nil {
+		activeFault = f.Type
 	}
 
+	// Build the envelope from the payload staged by the matching publish step.
 	payload, ok := e.published[step.EventID]
 	if !ok {
 		return fmt.Errorf("deliver step %q references unknown event %q", step.ID, step.EventID)
@@ -731,13 +741,46 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	if err := events.Validate(env); err != nil {
 		return fmt.Errorf("validate envelope: %w", err)
 	}
-
-	record, perr := e.sample.ProcessEvent(ctx, env)
 	deliveredAt := time.Now().UTC()
+
+	switch activeFault {
+	case "retry":
+		// Retryable failure BEFORE database commit: no effect is persisted,
+		// so a later redelivery can apply the effect exactly once.
+		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "retry"); err != nil {
+			return fmt.Errorf("record attempt: %w", err)
+		}
+		return nil // expected retryable failure; the plan continues to a later redelivery
+	case "crash_after_commit":
+		// Crash AFTER commit but BEFORE ack: the consumer persists the effect
+		// (dedup-safe) and then crashes before acknowledging, forcing the
+		// broker to redeliver the event whose side effect already persisted.
+		if _, perr := e.sample.ProcessEvent(ctx, env); perr != nil && !sampleconsumer.IsCrashAfterCommit(perr) {
+			return fmt.Errorf("process event %q: %w", step.EventID, perr)
+		}
+		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "crash_after_commit"); err != nil {
+			return fmt.Errorf("record attempt: %w", err)
+		}
+		return nil // expected crash after commit; redelivery will follow
+	}
+
+	// One-shot crash fault set by a preceding "crash" step: crash before
+	// committing any effect.
+	if f != nil {
+		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, f.Type); err != nil {
+			return fmt.Errorf("record attempt: %w", err)
+		}
+		return nil // expected crash; the scenario continues
+	}
+
+	// Normal delivery: apply the effect and acknowledge. Any fault declared
+	// on the step that is not an execution fault (retry, crash_after_commit)
+	// is still recorded on the attempt for timeline observability.
+	record, perr := e.sample.ProcessEvent(ctx, env)
 	if perr != nil {
 		// Processing failed: record the attempt without an acknowledgement
 		// and surface the error so the run does not pass on a broken step.
-		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil); err != nil {
+		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, step.Fault); err != nil {
 			return fmt.Errorf("record failed attempt: %w", err)
 		}
 		if record != nil {
@@ -747,30 +790,31 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	}
 	_ = record
 	acknowledgedAt := deliveredAt
-	if err := e.recordAttempt(ctx, runID, step, deliveredAt, &acknowledgedAt); err != nil {
+	if err := e.recordAttempt(ctx, runID, step, deliveredAt, &acknowledgedAt, step.Fault); err != nil {
 		return err
 	}
 	return nil
 }
 
 // recordAttempt persists one delivery attempt for a scenario step. Attempts
-// default to 1 when the step carries no attempt number. faultInjected is set
-// from the step's fault so the timeline shows which deliveries were
-// scenario-induced anomalies.
+// default to 1 when the step carries no attempt number. faultInjected names
+// the scenario-induced fault (empty when no fault) so the timeline shows
+// which deliveries were anomalies.
 func (e *defaultExecutor) recordAttempt(
 	ctx context.Context,
 	runID string,
 	step scenarios.Step,
 	deliveredAt time.Time,
 	acknowledgedAt *time.Time,
+	faultInjected string,
 ) error {
 	attempt := step.Attempt
 	if attempt <= 0 {
 		attempt = 1
 	}
 	var fault *string
-	if step.Fault != "" {
-		fault = &step.Fault
+	if faultInjected != "" {
+		fault = &faultInjected
 	}
 	if _, err := e.store.CreateEventAttempt(ctx, runID, step.EventID, int32(attempt), deliveredAt, acknowledgedAt, fault); err != nil {
 		return fmt.Errorf("record attempt: %w", err)

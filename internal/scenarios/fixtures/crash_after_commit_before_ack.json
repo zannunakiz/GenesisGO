@@ -4,7 +4,7 @@
   "name": "Crash After Commit Before Ack",
   "description": "The consumer commits the business effect to the database then crashes before acknowledging, forcing a redelivery that must not duplicate the effect.",
   "steps": [
-    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-004", "payload": { "type": "payment", "aggregate_id": "order-400", "amount_cents": 750, "currency": "USD", "idempotency_key": "pay-order-400" } },
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-004", "payload": { "type": "payment.succeeded", "aggregate_id": "order-400", "amount_cents": 750, "currency": "USD", "idempotency_key": "pay-order-400" } },
     { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-004", "attempt": 1 },
     { "id": "crash-1", "type": "crash", "fault": "crash_after_commit" },
     { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-004", "attempt": 2 },
