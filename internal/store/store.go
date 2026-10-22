@@ -51,14 +51,19 @@ type Run struct {
 }
 
 // RunJob is a bounded unit of work scheduled by the orchestrator for a run.
+// A job is claimed by exactly one worker at a time using a lease; an expired
+// lease marks a job whose worker was interrupted and that can be reclaimed.
 type RunJob struct {
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	JobType   string    `json:"job_type"`
-	Status    string    `json:"status"`
-	Payload   []byte    `json:"payload,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             string     `json:"id"`
+	RunID          string     `json:"run_id"`
+	JobType        string     `json:"job_type"`
+	Status         string     `json:"status"`
+	Payload        []byte     `json:"payload,omitempty"`
+	LeasedAt       *time.Time `json:"leased_at,omitempty"`
+	LeaseOwner     *string    `json:"lease_owner,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // EventAttempt is a single delivery attempt of an event to the consumer.
@@ -134,6 +139,7 @@ func scanRunJob(row pgx.Row) (*RunJob, error) {
 	var j RunJob
 	if err := row.Scan(
 		&j.ID, &j.RunID, &j.JobType, &j.Status, &j.Payload,
+		&j.LeasedAt, &j.LeaseOwner, &j.LeaseExpiresAt,
 		&j.CreatedAt, &j.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -381,6 +387,101 @@ func (s *Store) ListRunJobsByRun(ctx context.Context, runID string) ([]*RunJob, 
 	return ListRunJobsByRun(ctx, s.pool, runID)
 }
 
+// ---- run job leasing ------------------------------------------------------
+
+// GetScenarioByKey returns a scenario by its unique key.
+func GetScenarioByKey(ctx context.Context, q queryer, key string) (*Scenario, error) {
+	const query = `
+		SELECT id, key, name, description, created_at, updated_at
+		FROM scenarios
+		WHERE key = $1;
+	`
+	row := q.QueryRow(ctx, query, key)
+	return scanScenario(row)
+}
+
+func (s *Store) GetScenarioByKey(ctx context.Context, key string) (*Scenario, error) {
+	return GetScenarioByKey(ctx, s.pool, key)
+}
+
+// ClaimRunJob atomically claims the oldest queued run job. It uses FOR UPDATE
+// SKIP LOCKED so concurrent workers never claim the same job, and sets a lease
+// (owned by `owner`) that expires after `ttlSeconds`. An expired lease marks a
+// job whose worker was interrupted and that can be recovered by RecoverExpiredLeases.
+func ClaimRunJob(ctx context.Context, q queryer, owner string, ttlSeconds int64) (*RunJob, error) {
+	const query = `
+		UPDATE run_jobs
+		SET status = 'claimed', leased_at = now(), lease_owner = $2,
+		    lease_expires_at = now() + ($3 * interval '1 second'), updated_at = now()
+		WHERE id = (
+			SELECT id FROM run_jobs
+			WHERE status = 'queued'
+			ORDER BY created_at ASC
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, run_id, job_type, status, payload, created_at, updated_at,
+			leased_at, lease_owner, lease_expires_at;
+	`
+	row := q.QueryRow(ctx, query, owner, ttlSeconds)
+	return scanRunJob(row)
+}
+
+func (s *Store) ClaimRunJob(ctx context.Context, owner string, ttlSeconds int64) (*RunJob, error) {
+	return ClaimRunJob(ctx, s.pool, owner, ttlSeconds)
+}
+
+// UpdateRunJobStatus sets a run job's status.
+func UpdateRunJobStatus(ctx context.Context, q queryer, jobID, status string) error {
+	const query = `
+		UPDATE run_jobs
+		SET status = $2, updated_at = now()
+		WHERE id = $1;
+	`
+	_, err := q.Exec(ctx, query, jobID, status)
+	return err
+}
+
+func (s *Store) UpdateRunJobStatus(ctx context.Context, jobID, status string) error {
+	return UpdateRunJobStatus(ctx, s.pool, jobID, status)
+}
+
+// HeartbeatRunJob renews a claimed job's lease. It is a no-op unless the job is
+// still claimed by the same owner, which prevents a stale worker from extending
+// another worker's lease.
+func HeartbeatRunJob(ctx context.Context, q queryer, jobID string, ttlSeconds int64, owner string) error {
+	const query = `
+		UPDATE run_jobs
+		SET leased_at = now(), lease_expires_at = now() + ($2 * interval '1 second'), updated_at = now()
+		WHERE id = $1 AND status = 'claimed' AND lease_owner = $3;
+	`
+	_, err := q.Exec(ctx, query, jobID, ttlSeconds, owner)
+	return err
+}
+
+func (s *Store) HeartbeatRunJob(ctx context.Context, jobID string, ttlSeconds int64, owner string) error {
+	return HeartbeatRunJob(ctx, s.pool, jobID, ttlSeconds, owner)
+}
+
+// RecoverExpiredLeases resets claimed jobs whose lease has expired back to
+// queued so they can be claimed and executed by another worker.
+func RecoverExpiredLeases(ctx context.Context, q queryer) (int64, error) {
+	const query = `
+		UPDATE run_jobs
+		SET status = 'queued', leased_at = NULL, lease_owner = NULL,
+		    lease_expires_at = NULL, updated_at = now()
+		WHERE status = 'claimed' AND lease_expires_at < now();
+	`
+	tag, err := q.Exec(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) RecoverExpiredLeases(ctx context.Context) (int64, error) {
+	return RecoverExpiredLeases(ctx, s.pool)
+}
 // ---- event attempts -----------------------------------------------------
 
 // CreateEventAttempt records a single delivery attempt.
