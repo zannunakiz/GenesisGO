@@ -4,7 +4,7 @@
   "name": "Worker Restart",
   "description": "The worker restarts mid-scenario to verify in-progress state is recovered and no effects are lost or duplicated.",
   "steps": [
-    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-003", "payload": { "type": "payment", "aggregate_id": "order-300", "amount_cents": 500, "currency": "USD", "idempotency_key": "pay-order-300" } },
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-003", "payload": { "type": "payment.succeeded", "aggregate_id": "order-300", "amount_cents": 500, "currency": "USD", "idempotency_key": "pay-order-300" } },
     { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-003", "attempt": 1 },
     { "id": "restart-1", "type": "restart" },
     { "id": "deliver-2", "type": "deliver", "event_id": "evt-pay-003", "attempt": 2 },

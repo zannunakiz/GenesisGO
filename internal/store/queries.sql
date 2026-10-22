@@ -11,6 +11,39 @@ SELECT id, key, name, description, created_at, updated_at
 FROM scenarios
 WHERE id = $1;
 
+-- name: GetScenarioByKey :one
+SELECT id, key, name, description, created_at, updated_at
+FROM scenarios
+WHERE key = $1;
+
+-- name: ClaimRunJob :one
+UPDATE run_jobs
+SET status = 'claimed', leased_at = now(), lease_owner = $2,
+    lease_expires_at = now() + ($3 * interval '1 second'), updated_at = now()
+WHERE id = (
+    SELECT id FROM run_jobs
+    WHERE status = 'queued'
+    ORDER BY created_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, run_id, job_type, status, payload, created_at, updated_at, leased_at, lease_owner, lease_expires_at;
+
+-- name: UpdateRunJobStatus :exec
+UPDATE run_jobs
+SET status = $2, updated_at = now()
+WHERE id = $1;
+
+-- name: HeartbeatRunJob :exec
+UPDATE run_jobs
+SET leased_at = now(), lease_expires_at = now() + ($2 * interval '1 second'), updated_at = now()
+WHERE id = $1 AND status = 'claimed' AND lease_owner = $3;
+
+-- name: RecoverExpiredLeases :exec
+UPDATE run_jobs
+SET status = 'queued', leased_at = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+WHERE status = 'claimed' AND lease_expires_at < now();
+
 -- name: ListScenarios :many
 SELECT id, key, name, description, created_at, updated_at
 FROM scenarios
