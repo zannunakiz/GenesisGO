@@ -101,6 +101,10 @@ func (f *fakeBroker) Close() error {
 	return nil
 }
 
+func (f *fakeBroker) DeleteConsumer(_ context.Context, _ string) error {
+	return nil
+}
+
 func (f *fakeBroker) Ready() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

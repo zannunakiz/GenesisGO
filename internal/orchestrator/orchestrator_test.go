@@ -202,6 +202,53 @@ func (f *fakeStore) CreateEventAttempt(ctx context.Context, runID, eventID strin
 	return a, nil
 }
 
+func (f *fakeStore) CountEventAttemptsByRun(ctx context.Context, runID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.attempts[runID]), nil
+}
+
+func (f *fakeStore) CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*store.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.runs[runID]
+	if !ok {
+		return nil, pgx.ErrNoRows
+	}
+	if store.IsTerminal(store.RunState(r.Status)) {
+		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", store.ErrInvalidTransition, runID, r.Status)
+	}
+	from := store.RunState(r.Status)
+	if from != store.RunStateRunning && from != store.RunStatePending {
+		return nil, fmt.Errorf("%w: run %q is %q, expected %q or %q", store.ErrInvalidTransition, runID, r.Status, store.RunStateRunning, store.RunStatePending)
+	}
+	r.Status = string(store.RunStateCancelled)
+	r.Version++
+	r.AttemptCount++
+	return r, nil
+}
+
+func (f *fakeStore) DeleteRunData(ctx context.Context, runID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.runs, runID)
+	delete(f.jobsByRun, runID)
+	delete(f.sideEffects, runID)
+	delete(f.attempts, runID)
+	delete(f.invariants, runID)
+	return 1, nil
+}
+
+func (f *fakeStore) ListRunsOlderThan(ctx context.Context, cutoff time.Time) ([]*store.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*store.Run
+	for _, r := range f.runs {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 // attemptsFor returns a run's attempts for one event, in record order.
 func (f *fakeStore) attemptsFor(runID, eventID string) []*store.EventAttempt {
 	f.mu.Lock()

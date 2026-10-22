@@ -70,6 +70,8 @@ type RunStore interface {
 	CreateInvariantResult(ctx context.Context, runID, invariantKey, verdict string, details []byte) (*store.InvariantResult, error)
 	ListSideEffectRecordsByRun(ctx context.Context, runID string) ([]*store.SideEffectRecord, error)
 	CreateEventAttempt(ctx context.Context, runID, eventID string, attemptNumber int32, deliveredAt time.Time, acknowledgedAt *time.Time, faultInjected *string) (*store.EventAttempt, error)
+	CountEventAttemptsByRun(ctx context.Context, runID string) (int, error)
+	CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*store.Run, error)
 	ListRunJobsByRun(ctx context.Context, runID string) ([]*store.RunJob, error)
 	ListInvariantResultsByRun(ctx context.Context, runID string) ([]*store.InvariantResult, error)
 }
@@ -109,6 +111,9 @@ type Config struct {
 	// LeaseTTL is how long a claimed job's lease lasts before another worker
 	// may recover it. Heartbeats renew the lease while a worker runs.
 	LeaseTTL time.Duration
+	// MaxEventsPerRun caps the total number of events published for a single
+	// run. Zero means no limit beyond the config default.
+	MaxEventsPerRun int
 	// Logger is optional; slog.Default() is used when nil.
 	Logger *slog.Logger
 }
@@ -153,6 +158,10 @@ func New(cfg Config) (*Orchestrator, error) {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	maxEvents := cfg.MaxEventsPerRun
+	if maxEvents <= 0 {
+		maxEvents = 1_000
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -168,6 +177,7 @@ func New(cfg Config) (*Orchestrator, error) {
 			WorkerConcurrency: conc,
 			RunTimeout:        timeout,
 			LeaseTTL:          lease,
+			MaxEventsPerRun:   maxEvents,
 			Logger:            log,
 		},
 		log:       log,
@@ -393,15 +403,30 @@ func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.R
 	}
 
 	if execErr != nil {
-		return o.failRun(ctx, run.ID, run.Version, fmt.Errorf("execute scenario: %w", execErr))
+		run, ferr := o.failRun(ctx, run.ID, run.Version, fmt.Errorf("execute scenario: %w", execErr))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
 	}
 
 	allPass, verdictErr := o.allInvariantsPass(ctx, run.ID)
 	if verdictErr != nil {
-		return o.failRun(ctx, run.ID, run.Version, fmt.Errorf("read invariant results: %w", verdictErr))
+		run, ferr := o.failRun(ctx, run.ID, run.Version, fmt.Errorf("read invariant results: %w", verdictErr))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
 	}
 	if !allPass {
-		return o.failRun(ctx, run.ID, run.Version, errors.New("one or more invariants failed"))
+		run, ferr := o.failRun(ctx, run.ID, run.Version, errors.New("one or more invariants failed"))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
 	}
 
 	run, err = o.cfg.Store.TransitionRun(ctx, store.TransitionInput{
@@ -419,7 +444,23 @@ func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.R
 			o.log.Warn("mark job completed failed", slog.String("job_id", job.ID), slog.String("error", err.Error()))
 		}
 	}
+	o.cleanupRun(ctx, run.ID)
 	return run, nil
+}
+
+// cleanupRun releases ephemeral resources for a terminal run. It stops the
+// run's NATS durable consumer so no further redeliveries occur. Database
+// evidence is intentionally retained for reporting.
+func (o *Orchestrator) cleanupRun(ctx context.Context, runID string) {
+	if o.cfg.Broker == nil {
+		return
+	}
+	if err := o.cfg.Broker.DeleteConsumer(ctx, runID); err != nil && !errors.Is(err, broker.ErrNotStarted) {
+		o.log.Warn("run cleanup failed",
+			slog.String("run_id", runID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // failRun transitions a run from running to failed and marks its job failed.
@@ -438,6 +479,43 @@ func (o *Orchestrator) failRun(ctx context.Context, runID string, version int32,
 		_ = o.cfg.Store.UpdateRunJobStatus(context.Background(), job.ID, "failed")
 	}
 	return run, nil
+}
+
+// CancelRun transitions a running run to cancelled. It is safe to call on a
+// run that is pending or already terminal; those cases return a descriptive
+// error. Callers must hold no run-specific lock.
+func (o *Orchestrator) CancelRun(ctx context.Context, runID string) (*store.Run, error) {
+	run, err := o.cfg.Store.GetRun(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRunNotFound
+		}
+		return nil, err
+	}
+	if store.IsTerminal(store.RunState(run.Status)) {
+		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", store.ErrInvalidTransition, runID, run.Status)
+	}
+	expectedVersion := run.Version
+	// Attempt the transition; if the version changed concurrently, retry once
+	// with the fresh version.
+	updated, err := o.cfg.Store.CancelRun(ctx, runID, expectedVersion, "cancelled by caller")
+	if err == store.ErrConcurrentUpdate {
+		run2, gerr := o.cfg.Store.GetRun(ctx, runID)
+		if gerr != nil {
+			if errors.Is(gerr, pgx.ErrNoRows) {
+				return nil, ErrRunNotFound
+			}
+			return nil, gerr
+		}
+		updated, err = o.cfg.Store.CancelRun(ctx, runID, run2.Version, "cancelled by caller")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if job, jerr := o.currentJob(ctx, runID); jerr == nil {
+		_ = o.cfg.Store.UpdateRunJobStatus(context.Background(), job.ID, "cancelled")
+	}
+	return updated, nil
 }
 
 // failJob marks a run job failed without touching the run status (used when the
@@ -510,11 +588,12 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 		return noopExecutor{}
 	}
 	return &defaultExecutor{
-		broker:    o.cfg.Broker,
-		store:     o.cfg.Store,
-		sample:    o.cfg.SampleConsumer,
-		log:       o.log,
-		published: make(map[string][]byte),
+		broker:           o.cfg.Broker,
+		store:            o.cfg.Store,
+		sample:           o.cfg.SampleConsumer,
+		log:              o.log,
+		maxEventsPerRun:  o.cfg.MaxEventsPerRun,
+		published:        make(map[string][]byte),
 	}
 }
 
@@ -606,13 +685,15 @@ func (noopExecutor) Execute(context.Context, string, *scenarios.Scenario) error 
 // out-of-order delivery reproducible from the scenario plan instead of
 // transport timing.
 type defaultExecutor struct {
-	broker broker.Broker
-	store  RunStore
-	sample *sampleconsumer.Consumer
-	log    *slog.Logger
-	mu     sync.Mutex
-	fault  *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
-	published map[string][]byte // event_id -> payload staged by publish steps
+	broker            broker.Broker
+	store             RunStore
+	sample            *sampleconsumer.Consumer
+	log               *slog.Logger
+	mu                sync.Mutex
+	fault             *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
+	published         map[string][]byte     // event_id -> payload staged by publish steps
+	maxEventsPerRun   int                   // cap on total events published for this run
+	publishedCount    int                   // running count of publish steps executed this run
 }
 
 // Execute runs every step of scenario for runID.
@@ -662,6 +743,11 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 		e.fault = nil
 		e.mu.Unlock()
 	case "publish":
+		// Enforce MaxEventsPerRun before publishing to prevent a run from
+		// exhausting the host with unbounded event generation.
+		if e.maxEventsPerRun > 0 && e.publishedCount >= e.maxEventsPerRun {
+			return fmt.Errorf("max events per run (%d) exceeded", e.maxEventsPerRun)
+		}
 		// Stage the event on the run's subject and cache its payload so
 		// deliver steps can replay the original event ID in plan order.
 		payload, merr := json.Marshal(step.Payload)
@@ -673,6 +759,7 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 		}
 		e.mu.Lock()
 		e.published[step.EventID] = append([]byte{}, payload...)
+		e.publishedCount++
 		e.mu.Unlock()
 	case "deliver":
 		// Apply the event to the sample consumer now, in plan order. This is

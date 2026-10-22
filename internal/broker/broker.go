@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,6 +72,11 @@ type Broker interface {
 	// and invokes handler for each message. The durable consumer is created
 	// idempotently.
 	Subscribe(ctx context.Context, runID string, handler HandlerFunc) error
+
+	// DeleteConsumer stops and removes a run's durable consumer so no further
+	// redeliveries occur for that run. It is idempotent: deleting a consumer
+	// that does not exist is not an error.
+	DeleteConsumer(ctx context.Context, runID string) error
 
 	// Close shuts down the NATS connection and stops all consumers. It is
 	// idempotent.
@@ -309,6 +315,42 @@ func (b *jetStreamBroker) Subscribe(ctx context.Context, runID string, handler H
 	return nil
 }
 
+// DeleteConsumer stops and removes a run's durable consumer so no further
+// redeliveries occur for that run. It is idempotent: deleting a consumer that
+// does not exist is not an error. The stream and its messages are retained so
+// evidence remains available for reporting.
+func (b *jetStreamBroker) DeleteConsumer(ctx context.Context, runID string) error {
+	if !b.started.Load() || b.closed.Load() {
+		return ErrNotStarted
+	}
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	durable := b.consumerName(runID)
+	if err := b.js.DeleteConsumer(ctx, b.stream, durable); err != nil {
+		// Consumer may already be gone; treat as success for idempotency.
+		if isConsumerNotFoundErr(err) {
+			b.log.Debug("consumer already removed",
+				slog.String("run_id", runID),
+				slog.String("durable", durable),
+			)
+			return nil
+		}
+		return fmt.Errorf("delete consumer %q: %w", durable, err)
+	}
+	b.mu.Lock()
+	if cc, ok := b.consumes[runID]; ok {
+		cc.Stop()
+		delete(b.consumes, runID)
+	}
+	b.mu.Unlock()
+	b.log.Debug("consumer deleted",
+		slog.String("run_id", runID),
+		slog.String("durable", durable),
+	)
+	return nil
+}
+
 // Close shuts down the NATS connection and stops all consumers. It is
 // idempotent and safe to call multiple times.
 func (b *jetStreamBroker) Close() error {
@@ -468,4 +510,16 @@ func safeError(err error) string {
 		return ""
 	}
 	return fmt.Sprintf("%v", err)
+}
+
+// isConsumerNotFoundErr reports whether err indicates a JetStream consumer
+// does not exist (name varies by NATS server version).
+func isConsumerNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "consumer not found") ||
+		strings.Contains(msg, "no consumer") ||
+		strings.Contains(msg, "10094") // NATS API: consumer not found
 }
