@@ -681,3 +681,65 @@ func TestStateSnapshotsCapturedForDelivery(t *testing.T) {
 }
 
 
+func TestNotEvaluatedOnExecutionFailure(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, unknownEventFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "unknown_event")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateFailed))
+
+	// Declared invariants must be not_evaluated when execution fails.
+	results, err := st.ListInvariantResultsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list invariant results: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected invariant results, got none")
+	}
+	for _, r := range results {
+		if r.Verdict != string(invariants.StatusNotEvaluated) {
+			t.Fatalf("expected not_evaluated for invariant %q, got %q", r.InvariantKey, r.Verdict)
+		}
+	}
+}
+
+func TestNotEvaluatedForUndeclaredRules(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, duplicateDeliveryFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "duplicate_delivery")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	// Declared invariants should pass.
+	for _, key := range []string{"no_duplicate_payment", "idempotency_key_unique"} {
+		if got := invariantVerdict(t, st, run.ID, key); got != "pass" {
+			t.Fatalf("expected %q to pass, got %q", key, got)
+		}
+	}
+
+	// Undeclared rules (e.g. no_negative_inventory, allowed_order_transition)
+	// should be not_evaluated.
+	for _, key := range []string{"no_negative_inventory", "allowed_order_transition"} {
+		if got := invariantVerdict(t, st, run.ID, key); got != string(invariants.StatusNotEvaluated) {
+			t.Fatalf("expected %q to be not_evaluated, got %q", key, got)
+		}
+	}
+}
+
+

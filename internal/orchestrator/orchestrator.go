@@ -399,18 +399,24 @@ func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.R
 	executor := o.executorFor(run.ID)
 	execErr := executor.Execute(execCtx, run.ID, s)
 
-	// Record invariant evidence regardless of outcome so a verdict exists.
-	if evalErr := o.evaluateAndRecord(ctx, run.ID, s); evalErr != nil {
-		o.log.Warn("evaluate invariants failed", slog.String("run_id", run.ID), slog.String("error", evalErr.Error()))
-	}
-
+	// Evaluate invariants only when execution succeeded. On execution failure
+	// record every declared invariant as not_evaluated so an execution error
+	// is never reported as a successful invariant evaluation.
 	if execErr != nil {
+		if neErr := o.recordNotEvaluated(ctx, run.ID, s); neErr != nil {
+			o.log.Warn("record not_evaluated invariants failed", slog.String("run_id", run.ID), slog.String("error", neErr.Error()))
+		}
 		run, ferr := o.failRun(ctx, run.ID, run.Version, fmt.Errorf("execute scenario: %w", execErr))
 		if ferr != nil {
 			return nil, ferr
 		}
 		o.cleanupRun(ctx, run.ID)
 		return run, nil
+	}
+
+	// Record invariant evidence after successful execution.
+	if evalErr := o.evaluateAndRecord(ctx, run.ID, s); evalErr != nil {
+		o.log.Warn("evaluate invariants failed", slog.String("run_id", run.ID), slog.String("error", evalErr.Error()))
 	}
 
 	allPass, verdictErr := o.allInvariantsPass(ctx, run.ID)
@@ -601,9 +607,8 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 
 // evaluateAndRecord builds run evidence from persisted side-effect records,
 // evaluates the invariants declared by the scenario, and records one invariant
-// result per declared rule. Rules not declared by the scenario are skipped so
-// unrelated defaults (e.g. no_duplicate_effect for an inventory-only scenario)
-// cannot cause a spurious failure.
+// result per declared rule. Rules not declared by the scenario are recorded
+// as not_evaluated so every rule has a deterministic verdict for the run.
 func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
 	effects, err := o.cfg.Store.ListSideEffectRecordsByRun(ctx, runID)
 	if err != nil {
@@ -636,7 +641,12 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 	for _, r := range results {
 		scenarioKey, ok := ruleToScenarioKey[r.InvariantKey]
 		if !ok {
-			continue // rule not declared by this scenario
+			// Rule not declared by this scenario: record as not_evaluated
+			// instead of skipping so every rule has a deterministic verdict.
+			if err := o.recordNotEvaluatedResult(ctx, runID, r.InvariantKey, r.Rule); err != nil {
+				return err
+			}
+			continue
 		}
 		details, merr := json.Marshal(map[string]any{
 			"rule":     r.Rule,
@@ -654,8 +664,37 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 	return nil
 }
 
+// recordNotEvaluated records every invariant declared by the scenario as
+// not_evaluated. Used when execution failed before invariant evaluation
+// could run, so an execution error is never reported as a successful
+// invariant evaluation.
+func (o *Orchestrator) recordNotEvaluated(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
+	for _, inv := range scenario.Invariants {
+		if err := o.recordNotEvaluatedResult(ctx, runID, inv.Key, inv.Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordNotEvaluatedResult records a single not_evaluated invariant result.
+func (o *Orchestrator) recordNotEvaluatedResult(ctx context.Context, runID, invariantKey, rule string) error {
+	details, merr := json.Marshal(map[string]any{
+		"rule":     rule,
+		"expected": "rule evaluated against run evidence",
+		"actual":   "not evaluated",
+		"evidence": []string{},
+	})
+	if merr != nil {
+		return merr
+	}
+	_, err := o.cfg.Store.CreateInvariantResult(ctx, runID, invariantKey, string(invariants.StatusNotEvaluated), details)
+	return err
+}
+
 // allInvariantsPass reports whether every recorded invariant result passed.
-// A run with no recorded results does not pass.
+// A run with no recorded results does not pass. A not_evaluated verdict does
+// not block a run from passing; only a fail verdict does.
 func (o *Orchestrator) allInvariantsPass(ctx context.Context, runID string) (bool, error) {
 	results, err := o.cfg.Store.ListInvariantResultsByRun(ctx, runID)
 	if err != nil {
@@ -665,7 +704,7 @@ func (o *Orchestrator) allInvariantsPass(ctx context.Context, runID string) (boo
 		return false, nil
 	}
 	for _, r := range results {
-		if r.Verdict != "pass" {
+		if r.Verdict == string(invariants.StatusFail) {
 			return false, nil
 		}
 	}

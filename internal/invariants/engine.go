@@ -22,6 +22,10 @@ const (
 	StatusFail Status = "fail"
 	// StatusError means the rule could not be evaluated (e.g. malformed input).
 	StatusError Status = "error"
+	// StatusNotEvaluated means the rule was not evaluated for this run,
+	// either because it was not declared by the scenario or because
+	// execution failed before invariant evaluation could run.
+	StatusNotEvaluated Status = "not_evaluated"
 )
 
 // EffectRecord is a single observed business effect in a run.
