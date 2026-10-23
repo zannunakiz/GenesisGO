@@ -74,6 +74,8 @@ type RunStore interface {
 	CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*store.Run, error)
 	ListRunJobsByRun(ctx context.Context, runID string) ([]*store.RunJob, error)
 	ListInvariantResultsByRun(ctx context.Context, runID string) ([]*store.InvariantResult, error)
+	CreateStateSnapshot(ctx context.Context, runID, stepID, eventID, snapshotType, aggregateID string, stateSummary []byte) (*store.StateSnapshot, error)
+	ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*store.StateSnapshot, error)
 }
 
 var _ RunStore = (*store.Store)(nil)
@@ -830,10 +832,15 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	}
 	deliveredAt := time.Now().UTC()
 
+	// Extract the aggregate id from the payload so state snapshots can be
+	// scoped to the business aggregate affected by this delivery.
+	aggregateID, _ := aggregateIDFromPayload(env.Payload)
+
 	switch activeFault {
 	case "retry":
 		// Retryable failure BEFORE database commit: no effect is persisted,
 		// so a later redelivery can apply the effect exactly once.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "retry"); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -842,9 +849,11 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 		// Crash AFTER commit but BEFORE ack: the consumer persists the effect
 		// (dedup-safe) and then crashes before acknowledging, forcing the
 		// broker to redeliver the event whose side effect already persisted.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if _, perr := e.sample.ProcessEvent(ctx, env); perr != nil && !sampleconsumer.IsCrashAfterCommit(perr) {
 			return fmt.Errorf("process event %q: %w", step.EventID, perr)
 		}
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "crash_after_commit"); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -854,6 +863,7 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	// One-shot crash fault set by a preceding "crash" step: crash before
 	// committing any effect.
 	if f != nil {
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, f.Type); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -863,10 +873,12 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	// Normal delivery: apply the effect and acknowledge. Any fault declared
 	// on the step that is not an execution fault (retry, crash_after_commit)
 	// is still recorded on the attempt for timeline observability.
+	_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 	record, perr := e.sample.ProcessEvent(ctx, env)
 	if perr != nil {
 		// Processing failed: record the attempt without an acknowledgement
 		// and surface the error so the run does not pass on a broken step.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, step.Fault); err != nil {
 			return fmt.Errorf("record failed attempt: %w", err)
 		}
@@ -875,6 +887,7 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 		}
 		return fmt.Errorf("process event %q: %w", step.EventID, perr)
 	}
+	_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 	_ = record
 	acknowledgedAt := deliveredAt
 	if err := e.recordAttempt(ctx, runID, step, deliveredAt, &acknowledgedAt, step.Fault); err != nil {
@@ -921,6 +934,59 @@ func eventTypeFromPayload(payload map[string]any) (events.EventType, error) {
 	default:
 		return "", fmt.Errorf("unsupported event type %q in payload", t)
 	}
+}
+
+// aggregateIDFromPayload extracts the aggregate_id from a synthetic event
+// payload. Returns empty string if the payload cannot be parsed or has no
+// aggregate_id.
+func aggregateIDFromPayload(raw []byte) (string, error) {
+	var p struct {
+		AggregateID string `json:"aggregate_id"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", err
+	}
+	return p.AggregateID, nil
+}
+
+// captureSnapshot records a before/after state summary for an event delivery.
+// The state_summary contains only safe aggregate-level data (effect count and
+// latest effect for the aggregate) — never raw payloads or secrets.
+func (e *defaultExecutor) captureSnapshot(
+	ctx context.Context,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+) error {
+	effects, err := e.store.ListSideEffectRecordsByRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	var matching []map[string]any
+	for _, eff := range effects {
+		if eff.AggregateID == aggregateID {
+			matching = append(matching, map[string]any{
+				"id":             eff.ID,
+				"effect_type":    eff.EffectType,
+				"aggregate_id":   eff.AggregateID,
+				"idempotency_key": eff.IdempotencyKey,
+				"amount_cents":   eff.AmountCents,
+				"currency":       eff.Currency,
+				"recorded_at":    eff.RecordedAt,
+			})
+		}
+	}
+	summary := map[string]any{
+		"aggregate_id": aggregateID,
+		"effect_count": len(matching),
+		"effects":      matching,
+	}
+	raw, merr := json.Marshal(summary)
+	if merr != nil {
+		return merr
+	}
+	if _, err := e.store.CreateStateSnapshot(ctx, runID, stepID, eventID, snapshotType, aggregateID, raw); err != nil {
+		return fmt.Errorf("create state snapshot: %w", err)
+	}
+	return nil
 }
 
 func (e *defaultExecutor) waitForEffects(ctx context.Context, runID string) error {

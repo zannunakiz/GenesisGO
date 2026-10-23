@@ -630,3 +630,54 @@ func TestWorkerRestartRecoversWithoutDuplicate(t *testing.T) {
 		t.Fatalf("expected idempotency_key_unique to pass, got %q", got)
 	}
 }
+
+
+func TestStateSnapshotsCapturedForDelivery(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, duplicateDeliveryFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "duplicate_delivery")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	// Verify before/after snapshots were captured for each delivery.
+	snaps, err := st.ListStateSnapshotsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list state snapshots: %v", err)
+	}
+	if len(snaps) == 0 {
+		t.Fatal("expected state snapshots to be captured, got none")
+	}
+	// Each delivery should have a before and after snapshot.
+	beforeCount := 0
+	afterCount := 0
+	for _, s := range snaps {
+		switch s.SnapshotType {
+		case "before":
+			beforeCount++
+		case "after":
+			afterCount++
+		default:
+			t.Fatalf("unexpected snapshot type %q", s.SnapshotType)
+		}
+		if s.AggregateID == "" {
+			t.Fatalf("snapshot missing aggregate_id: %+v", s)
+		}
+		if s.StateSummary == nil {
+			t.Fatalf("snapshot missing state_summary: %+v", s)
+		}
+	}
+	t.Logf("captured %d before and %d after snapshots", beforeCount, afterCount)
+	if beforeCount == 0 || afterCount == 0 {
+		t.Fatalf("expected both before and after snapshots, got before=%d after=%d", beforeCount, afterCount)
+	}
+}
+
+

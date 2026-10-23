@@ -60,6 +60,7 @@ type fakeStore struct {
 	sideEffects map[string][]*store.SideEffectRecord
 	attempts    map[string][]*store.EventAttempt // run_id -> attempts
 	invariants  map[string][]*store.InvariantResult
+	stateSnapshots map[string][]*store.StateSnapshot // run_id -> snapshots
 
 	// Claim behavior.
 	claimJob   *store.RunJob
@@ -79,6 +80,7 @@ func newFakeStore() *fakeStore {
 		sideEffects: make(map[string][]*store.SideEffectRecord),
 		attempts:    make(map[string][]*store.EventAttempt),
 		invariants:  make(map[string][]*store.InvariantResult),
+		stateSnapshots: make(map[string][]*store.StateSnapshot),
 	}
 }
 
@@ -236,6 +238,7 @@ func (f *fakeStore) DeleteRunData(ctx context.Context, runID string) (int64, err
 	delete(f.sideEffects, runID)
 	delete(f.attempts, runID)
 	delete(f.invariants, runID)
+	delete(f.stateSnapshots, runID)
 	return 1, nil
 }
 
@@ -280,6 +283,29 @@ func (f *fakeStore) ListSideEffectRecordsByRun(ctx context.Context, runID string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sideEffects[runID], nil
+}
+
+func (f *fakeStore) CreateStateSnapshot(ctx context.Context, runID, stepID, eventID, snapshotType, aggregateID string, stateSummary []byte) (*store.StateSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := &store.StateSnapshot{
+		ID:           fxID("snapshot"),
+		RunID:        runID,
+		StepID:       stepID,
+		EventID:      eventID,
+		SnapshotType: snapshotType,
+		AggregateID:  aggregateID,
+		StateSummary: stateSummary,
+		CreatedAt:    time.Now().UTC(),
+	}
+	f.stateSnapshots[runID] = append(f.stateSnapshots[runID], r)
+	return r, nil
+}
+
+func (f *fakeStore) ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*store.StateSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stateSnapshots[runID], nil
 }
 
 func (f *fakeStore) CreateSideEffectRecord(ctx context.Context, runID, effectType, aggregateID string, idempotencyKey *string, amountCents *int64, currency string) (*store.SideEffectRecord, error) {

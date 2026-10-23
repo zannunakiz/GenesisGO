@@ -110,6 +110,20 @@ type DiagnosisReport struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
+// StateSnapshot captures a safe before/after state summary for a single
+// event delivery within a run. Only non-sensitive summary data is stored;
+// full raw payloads are intentionally omitted.
+type StateSnapshot struct {
+	ID           string     `json:"id"`
+	RunID        string     `json:"run_id"`
+	StepID       string     `json:"step_id"`
+	EventID      string     `json:"event_id"`
+	SnapshotType string     `json:"snapshot_type"` // "before" or "after"
+	AggregateID  string     `json:"aggregate_id"`
+	StateSummary []byte     `json:"state_summary,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
 // Scan helpers map pgx rows onto models. NULLable columns scan into nil
 // pointers; JSONB columns scan into raw bytes.
 
@@ -187,6 +201,17 @@ func scanDiagnosisReport(row pgx.Row) (*DiagnosisReport, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func scanStateSnapshot(row pgx.Row) (*StateSnapshot, error) {
+	var s StateSnapshot
+	if err := row.Scan(
+		&s.ID, &s.RunID, &s.StepID, &s.EventID, &s.SnapshotType,
+		&s.AggregateID, &s.StateSummary, &s.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 // ---- scenarios ----------------------------------------------------------
@@ -580,6 +605,7 @@ func DeleteRunData(ctx context.Context, q queryer, runID string) (int64, error) 
 	const deleteTransitions = `DELETE FROM run_transitions WHERE run_id = $1`
 	const deleteDiagnosis = `DELETE FROM diagnosis_reports WHERE run_id = $1`
 	const deleteRejected = `DELETE FROM rejected_events WHERE run_id = $1`
+	const deleteSnapshots = `DELETE FROM state_snapshots WHERE run_id = $1`
 	const deleteRun = `DELETE FROM runs WHERE id = $1`
 
 	if _, err := q.Exec(ctx, deleteAttempts, runID); err != nil {
@@ -601,6 +627,9 @@ func DeleteRunData(ctx context.Context, q queryer, runID string) (int64, error) 
 		return 0, err
 	}
 	if _, err := q.Exec(ctx, deleteRejected, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteSnapshots, runID); err != nil {
 		return 0, err
 	}
 	tag, err := q.Exec(ctx, deleteRun, runID)
@@ -712,6 +741,67 @@ func ListSideEffectRecordsByRun(ctx context.Context, q queryer, runID string) ([
 
 func (s *Store) ListSideEffectRecordsByRun(ctx context.Context, runID string) ([]*SideEffectRecord, error) {
 	return ListSideEffectRecordsByRun(ctx, s.pool, runID)
+}
+
+// ---- state snapshots -----------------------------------------------------
+
+// CreateStateSnapshot records a safe before/after state summary for an event
+// delivery. Only non-sensitive summary data is stored.
+func CreateStateSnapshot(
+	ctx context.Context,
+	q queryer,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+	stateSummary []byte,
+) (*StateSnapshot, error) {
+	const query = `
+		INSERT INTO state_snapshots (run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary, created_at
+	`
+	row := q.QueryRow(ctx, query, runID, stepID, eventID, snapshotType, aggregateID, stateSummary)
+	return scanStateSnapshot(row)
+}
+
+func (s *Store) CreateStateSnapshot(
+	ctx context.Context,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+	stateSummary []byte,
+) (*StateSnapshot, error) {
+	return CreateStateSnapshot(ctx, s.pool, runID, stepID, eventID, snapshotType, aggregateID, stateSummary)
+}
+
+// ListStateSnapshotsByRun returns state snapshots for a run, oldest first.
+func ListStateSnapshotsByRun(ctx context.Context, q queryer, runID string) ([]*StateSnapshot, error) {
+	const query = `
+		SELECT id, run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary, created_at
+		FROM state_snapshots
+		WHERE run_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := q.Query(ctx, query, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*StateSnapshot
+	for rows.Next() {
+		s, err := scanStateSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []*StateSnapshot{}
+	}
+	return out, nil
+}
+
+func (s *Store) ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*StateSnapshot, error) {
+	return ListStateSnapshotsByRun(ctx, s.pool, runID)
 }
 
 // ---- invariant results --------------------------------------------------
