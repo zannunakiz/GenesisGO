@@ -60,6 +60,7 @@ type fakeStore struct {
 	sideEffects map[string][]*store.SideEffectRecord
 	attempts    map[string][]*store.EventAttempt // run_id -> attempts
 	invariants  map[string][]*store.InvariantResult
+	stateSnapshots map[string][]*store.StateSnapshot // run_id -> snapshots
 
 	// Claim behavior.
 	claimJob   *store.RunJob
@@ -79,6 +80,7 @@ func newFakeStore() *fakeStore {
 		sideEffects: make(map[string][]*store.SideEffectRecord),
 		attempts:    make(map[string][]*store.EventAttempt),
 		invariants:  make(map[string][]*store.InvariantResult),
+		stateSnapshots: make(map[string][]*store.StateSnapshot),
 	}
 }
 
@@ -202,6 +204,54 @@ func (f *fakeStore) CreateEventAttempt(ctx context.Context, runID, eventID strin
 	return a, nil
 }
 
+func (f *fakeStore) CountEventAttemptsByRun(ctx context.Context, runID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.attempts[runID]), nil
+}
+
+func (f *fakeStore) CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*store.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.runs[runID]
+	if !ok {
+		return nil, pgx.ErrNoRows
+	}
+	if store.IsTerminal(store.RunState(r.Status)) {
+		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", store.ErrInvalidTransition, runID, r.Status)
+	}
+	from := store.RunState(r.Status)
+	if from != store.RunStateRunning && from != store.RunStatePending {
+		return nil, fmt.Errorf("%w: run %q is %q, expected %q or %q", store.ErrInvalidTransition, runID, r.Status, store.RunStateRunning, store.RunStatePending)
+	}
+	r.Status = string(store.RunStateCancelled)
+	r.Version++
+	r.AttemptCount++
+	return r, nil
+}
+
+func (f *fakeStore) DeleteRunData(ctx context.Context, runID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.runs, runID)
+	delete(f.jobsByRun, runID)
+	delete(f.sideEffects, runID)
+	delete(f.attempts, runID)
+	delete(f.invariants, runID)
+	delete(f.stateSnapshots, runID)
+	return 1, nil
+}
+
+func (f *fakeStore) ListRunsOlderThan(ctx context.Context, cutoff time.Time) ([]*store.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*store.Run
+	for _, r := range f.runs {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 // attemptsFor returns a run's attempts for one event, in record order.
 func (f *fakeStore) attemptsFor(runID, eventID string) []*store.EventAttempt {
 	f.mu.Lock()
@@ -233,6 +283,29 @@ func (f *fakeStore) ListSideEffectRecordsByRun(ctx context.Context, runID string
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sideEffects[runID], nil
+}
+
+func (f *fakeStore) CreateStateSnapshot(ctx context.Context, runID, stepID, eventID, snapshotType, aggregateID string, stateSummary []byte) (*store.StateSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := &store.StateSnapshot{
+		ID:           fxID("snapshot"),
+		RunID:        runID,
+		StepID:       stepID,
+		EventID:      eventID,
+		SnapshotType: snapshotType,
+		AggregateID:  aggregateID,
+		StateSummary: stateSummary,
+		CreatedAt:    time.Now().UTC(),
+	}
+	f.stateSnapshots[runID] = append(f.stateSnapshots[runID], r)
+	return r, nil
+}
+
+func (f *fakeStore) ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*store.StateSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stateSnapshots[runID], nil
 }
 
 func (f *fakeStore) CreateSideEffectRecord(ctx context.Context, runID, effectType, aggregateID string, idempotencyKey *string, amountCents *int64, currency string) (*store.SideEffectRecord, error) {

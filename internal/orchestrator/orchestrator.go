@@ -70,8 +70,12 @@ type RunStore interface {
 	CreateInvariantResult(ctx context.Context, runID, invariantKey, verdict string, details []byte) (*store.InvariantResult, error)
 	ListSideEffectRecordsByRun(ctx context.Context, runID string) ([]*store.SideEffectRecord, error)
 	CreateEventAttempt(ctx context.Context, runID, eventID string, attemptNumber int32, deliveredAt time.Time, acknowledgedAt *time.Time, faultInjected *string) (*store.EventAttempt, error)
+	CountEventAttemptsByRun(ctx context.Context, runID string) (int, error)
+	CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*store.Run, error)
 	ListRunJobsByRun(ctx context.Context, runID string) ([]*store.RunJob, error)
 	ListInvariantResultsByRun(ctx context.Context, runID string) ([]*store.InvariantResult, error)
+	CreateStateSnapshot(ctx context.Context, runID, stepID, eventID, snapshotType, aggregateID string, stateSummary []byte) (*store.StateSnapshot, error)
+	ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*store.StateSnapshot, error)
 }
 
 var _ RunStore = (*store.Store)(nil)
@@ -109,6 +113,9 @@ type Config struct {
 	// LeaseTTL is how long a claimed job's lease lasts before another worker
 	// may recover it. Heartbeats renew the lease while a worker runs.
 	LeaseTTL time.Duration
+	// MaxEventsPerRun caps the total number of events published for a single
+	// run. Zero means no limit beyond the config default.
+	MaxEventsPerRun int
 	// Logger is optional; slog.Default() is used when nil.
 	Logger *slog.Logger
 }
@@ -153,6 +160,10 @@ func New(cfg Config) (*Orchestrator, error) {
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
+	maxEvents := cfg.MaxEventsPerRun
+	if maxEvents <= 0 {
+		maxEvents = 1_000
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -168,6 +179,7 @@ func New(cfg Config) (*Orchestrator, error) {
 			WorkerConcurrency: conc,
 			RunTimeout:        timeout,
 			LeaseTTL:          lease,
+			MaxEventsPerRun:   maxEvents,
 			Logger:            log,
 		},
 		log:       log,
@@ -387,21 +399,42 @@ func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.R
 	executor := o.executorFor(run.ID)
 	execErr := executor.Execute(execCtx, run.ID, s)
 
-	// Record invariant evidence regardless of outcome so a verdict exists.
+	// Evaluate invariants only when execution succeeded. On execution failure
+	// record every declared invariant as not_evaluated so an execution error
+	// is never reported as a successful invariant evaluation.
+	if execErr != nil {
+		if neErr := o.recordNotEvaluated(ctx, run.ID, s); neErr != nil {
+			o.log.Warn("record not_evaluated invariants failed", slog.String("run_id", run.ID), slog.String("error", neErr.Error()))
+		}
+		run, ferr := o.failRun(ctx, run.ID, run.Version, fmt.Errorf("execute scenario: %w", execErr))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
+	}
+
+	// Record invariant evidence after successful execution.
 	if evalErr := o.evaluateAndRecord(ctx, run.ID, s); evalErr != nil {
 		o.log.Warn("evaluate invariants failed", slog.String("run_id", run.ID), slog.String("error", evalErr.Error()))
 	}
 
-	if execErr != nil {
-		return o.failRun(ctx, run.ID, run.Version, fmt.Errorf("execute scenario: %w", execErr))
-	}
-
 	allPass, verdictErr := o.allInvariantsPass(ctx, run.ID)
 	if verdictErr != nil {
-		return o.failRun(ctx, run.ID, run.Version, fmt.Errorf("read invariant results: %w", verdictErr))
+		run, ferr := o.failRun(ctx, run.ID, run.Version, fmt.Errorf("read invariant results: %w", verdictErr))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
 	}
 	if !allPass {
-		return o.failRun(ctx, run.ID, run.Version, errors.New("one or more invariants failed"))
+		run, ferr := o.failRun(ctx, run.ID, run.Version, errors.New("one or more invariants failed"))
+		if ferr != nil {
+			return nil, ferr
+		}
+		o.cleanupRun(ctx, run.ID)
+		return run, nil
 	}
 
 	run, err = o.cfg.Store.TransitionRun(ctx, store.TransitionInput{
@@ -419,7 +452,23 @@ func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.R
 			o.log.Warn("mark job completed failed", slog.String("job_id", job.ID), slog.String("error", err.Error()))
 		}
 	}
+	o.cleanupRun(ctx, run.ID)
 	return run, nil
+}
+
+// cleanupRun releases ephemeral resources for a terminal run. It stops the
+// run's NATS durable consumer so no further redeliveries occur. Database
+// evidence is intentionally retained for reporting.
+func (o *Orchestrator) cleanupRun(ctx context.Context, runID string) {
+	if o.cfg.Broker == nil {
+		return
+	}
+	if err := o.cfg.Broker.DeleteConsumer(ctx, runID); err != nil && !errors.Is(err, broker.ErrNotStarted) {
+		o.log.Warn("run cleanup failed",
+			slog.String("run_id", runID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // failRun transitions a run from running to failed and marks its job failed.
@@ -438,6 +487,43 @@ func (o *Orchestrator) failRun(ctx context.Context, runID string, version int32,
 		_ = o.cfg.Store.UpdateRunJobStatus(context.Background(), job.ID, "failed")
 	}
 	return run, nil
+}
+
+// CancelRun transitions a running run to cancelled. It is safe to call on a
+// run that is pending or already terminal; those cases return a descriptive
+// error. Callers must hold no run-specific lock.
+func (o *Orchestrator) CancelRun(ctx context.Context, runID string) (*store.Run, error) {
+	run, err := o.cfg.Store.GetRun(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRunNotFound
+		}
+		return nil, err
+	}
+	if store.IsTerminal(store.RunState(run.Status)) {
+		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", store.ErrInvalidTransition, runID, run.Status)
+	}
+	expectedVersion := run.Version
+	// Attempt the transition; if the version changed concurrently, retry once
+	// with the fresh version.
+	updated, err := o.cfg.Store.CancelRun(ctx, runID, expectedVersion, "cancelled by caller")
+	if err == store.ErrConcurrentUpdate {
+		run2, gerr := o.cfg.Store.GetRun(ctx, runID)
+		if gerr != nil {
+			if errors.Is(gerr, pgx.ErrNoRows) {
+				return nil, ErrRunNotFound
+			}
+			return nil, gerr
+		}
+		updated, err = o.cfg.Store.CancelRun(ctx, runID, run2.Version, "cancelled by caller")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if job, jerr := o.currentJob(ctx, runID); jerr == nil {
+		_ = o.cfg.Store.UpdateRunJobStatus(context.Background(), job.ID, "cancelled")
+	}
+	return updated, nil
 }
 
 // failJob marks a run job failed without touching the run status (used when the
@@ -510,19 +596,19 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 		return noopExecutor{}
 	}
 	return &defaultExecutor{
-		broker:    o.cfg.Broker,
-		store:     o.cfg.Store,
-		sample:    o.cfg.SampleConsumer,
-		log:       o.log,
-		published: make(map[string][]byte),
+		broker:           o.cfg.Broker,
+		store:            o.cfg.Store,
+		sample:           o.cfg.SampleConsumer,
+		log:              o.log,
+		maxEventsPerRun:  o.cfg.MaxEventsPerRun,
+		published:        make(map[string][]byte),
 	}
 }
 
 // evaluateAndRecord builds run evidence from persisted side-effect records,
 // evaluates the invariants declared by the scenario, and records one invariant
-// result per declared rule. Rules not declared by the scenario are skipped so
-// unrelated defaults (e.g. no_duplicate_effect for an inventory-only scenario)
-// cannot cause a spurious failure.
+// result per declared rule. Rules not declared by the scenario are recorded
+// as not_evaluated so every rule has a deterministic verdict for the run.
 func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
 	effects, err := o.cfg.Store.ListSideEffectRecordsByRun(ctx, runID)
 	if err != nil {
@@ -555,7 +641,12 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 	for _, r := range results {
 		scenarioKey, ok := ruleToScenarioKey[r.InvariantKey]
 		if !ok {
-			continue // rule not declared by this scenario
+			// Rule not declared by this scenario: record as not_evaluated
+			// instead of skipping so every rule has a deterministic verdict.
+			if err := o.recordNotEvaluatedResult(ctx, runID, r.InvariantKey, r.Rule); err != nil {
+				return err
+			}
+			continue
 		}
 		details, merr := json.Marshal(map[string]any{
 			"rule":     r.Rule,
@@ -573,8 +664,37 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 	return nil
 }
 
+// recordNotEvaluated records every invariant declared by the scenario as
+// not_evaluated. Used when execution failed before invariant evaluation
+// could run, so an execution error is never reported as a successful
+// invariant evaluation.
+func (o *Orchestrator) recordNotEvaluated(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
+	for _, inv := range scenario.Invariants {
+		if err := o.recordNotEvaluatedResult(ctx, runID, inv.Key, inv.Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordNotEvaluatedResult records a single not_evaluated invariant result.
+func (o *Orchestrator) recordNotEvaluatedResult(ctx context.Context, runID, invariantKey, rule string) error {
+	details, merr := json.Marshal(map[string]any{
+		"rule":     rule,
+		"expected": "rule evaluated against run evidence",
+		"actual":   "not evaluated",
+		"evidence": []string{},
+	})
+	if merr != nil {
+		return merr
+	}
+	_, err := o.cfg.Store.CreateInvariantResult(ctx, runID, invariantKey, string(invariants.StatusNotEvaluated), details)
+	return err
+}
+
 // allInvariantsPass reports whether every recorded invariant result passed.
-// A run with no recorded results does not pass.
+// A run with no recorded results does not pass. A not_evaluated verdict does
+// not block a run from passing; only a fail verdict does.
 func (o *Orchestrator) allInvariantsPass(ctx context.Context, runID string) (bool, error) {
 	results, err := o.cfg.Store.ListInvariantResultsByRun(ctx, runID)
 	if err != nil {
@@ -584,7 +704,7 @@ func (o *Orchestrator) allInvariantsPass(ctx context.Context, runID string) (boo
 		return false, nil
 	}
 	for _, r := range results {
-		if r.Verdict != "pass" {
+		if r.Verdict == string(invariants.StatusFail) {
 			return false, nil
 		}
 	}
@@ -606,13 +726,15 @@ func (noopExecutor) Execute(context.Context, string, *scenarios.Scenario) error 
 // out-of-order delivery reproducible from the scenario plan instead of
 // transport timing.
 type defaultExecutor struct {
-	broker broker.Broker
-	store  RunStore
-	sample *sampleconsumer.Consumer
-	log    *slog.Logger
-	mu     sync.Mutex
-	fault  *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
-	published map[string][]byte // event_id -> payload staged by publish steps
+	broker            broker.Broker
+	store             RunStore
+	sample            *sampleconsumer.Consumer
+	log               *slog.Logger
+	mu                sync.Mutex
+	fault             *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
+	published         map[string][]byte     // event_id -> payload staged by publish steps
+	maxEventsPerRun   int                   // cap on total events published for this run
+	publishedCount    int                   // running count of publish steps executed this run
 }
 
 // Execute runs every step of scenario for runID.
@@ -662,6 +784,11 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 		e.fault = nil
 		e.mu.Unlock()
 	case "publish":
+		// Enforce MaxEventsPerRun before publishing to prevent a run from
+		// exhausting the host with unbounded event generation.
+		if e.maxEventsPerRun > 0 && e.publishedCount >= e.maxEventsPerRun {
+			return fmt.Errorf("max events per run (%d) exceeded", e.maxEventsPerRun)
+		}
 		// Stage the event on the run's subject and cache its payload so
 		// deliver steps can replay the original event ID in plan order.
 		payload, merr := json.Marshal(step.Payload)
@@ -673,6 +800,7 @@ func (e *defaultExecutor) runStep(ctx context.Context, runID string, step scenar
 		}
 		e.mu.Lock()
 		e.published[step.EventID] = append([]byte{}, payload...)
+		e.publishedCount++
 		e.mu.Unlock()
 	case "deliver":
 		// Apply the event to the sample consumer now, in plan order. This is
@@ -743,10 +871,15 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	}
 	deliveredAt := time.Now().UTC()
 
+	// Extract the aggregate id from the payload so state snapshots can be
+	// scoped to the business aggregate affected by this delivery.
+	aggregateID, _ := aggregateIDFromPayload(env.Payload)
+
 	switch activeFault {
 	case "retry":
 		// Retryable failure BEFORE database commit: no effect is persisted,
 		// so a later redelivery can apply the effect exactly once.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "retry"); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -755,9 +888,11 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 		// Crash AFTER commit but BEFORE ack: the consumer persists the effect
 		// (dedup-safe) and then crashes before acknowledging, forcing the
 		// broker to redeliver the event whose side effect already persisted.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if _, perr := e.sample.ProcessEvent(ctx, env); perr != nil && !sampleconsumer.IsCrashAfterCommit(perr) {
 			return fmt.Errorf("process event %q: %w", step.EventID, perr)
 		}
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, "crash_after_commit"); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -767,6 +902,7 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	// One-shot crash fault set by a preceding "crash" step: crash before
 	// committing any effect.
 	if f != nil {
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, f.Type); err != nil {
 			return fmt.Errorf("record attempt: %w", err)
 		}
@@ -776,10 +912,12 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 	// Normal delivery: apply the effect and acknowledge. Any fault declared
 	// on the step that is not an execution fault (retry, crash_after_commit)
 	// is still recorded on the attempt for timeline observability.
+	_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "before", aggregateID)
 	record, perr := e.sample.ProcessEvent(ctx, env)
 	if perr != nil {
 		// Processing failed: record the attempt without an acknowledgement
 		// and surface the error so the run does not pass on a broken step.
+		_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 		if err := e.recordAttempt(ctx, runID, step, deliveredAt, nil, step.Fault); err != nil {
 			return fmt.Errorf("record failed attempt: %w", err)
 		}
@@ -788,6 +926,7 @@ func (e *defaultExecutor) deliverEvent(ctx context.Context, runID string, step s
 		}
 		return fmt.Errorf("process event %q: %w", step.EventID, perr)
 	}
+	_ = e.captureSnapshot(ctx, runID, step.ID, step.EventID, "after", aggregateID)
 	_ = record
 	acknowledgedAt := deliveredAt
 	if err := e.recordAttempt(ctx, runID, step, deliveredAt, &acknowledgedAt, step.Fault); err != nil {
@@ -834,6 +973,59 @@ func eventTypeFromPayload(payload map[string]any) (events.EventType, error) {
 	default:
 		return "", fmt.Errorf("unsupported event type %q in payload", t)
 	}
+}
+
+// aggregateIDFromPayload extracts the aggregate_id from a synthetic event
+// payload. Returns empty string if the payload cannot be parsed or has no
+// aggregate_id.
+func aggregateIDFromPayload(raw []byte) (string, error) {
+	var p struct {
+		AggregateID string `json:"aggregate_id"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", err
+	}
+	return p.AggregateID, nil
+}
+
+// captureSnapshot records a before/after state summary for an event delivery.
+// The state_summary contains only safe aggregate-level data (effect count and
+// latest effect for the aggregate) — never raw payloads or secrets.
+func (e *defaultExecutor) captureSnapshot(
+	ctx context.Context,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+) error {
+	effects, err := e.store.ListSideEffectRecordsByRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	var matching []map[string]any
+	for _, eff := range effects {
+		if eff.AggregateID == aggregateID {
+			matching = append(matching, map[string]any{
+				"id":             eff.ID,
+				"effect_type":    eff.EffectType,
+				"aggregate_id":   eff.AggregateID,
+				"idempotency_key": eff.IdempotencyKey,
+				"amount_cents":   eff.AmountCents,
+				"currency":       eff.Currency,
+				"recorded_at":    eff.RecordedAt,
+			})
+		}
+	}
+	summary := map[string]any{
+		"aggregate_id": aggregateID,
+		"effect_count": len(matching),
+		"effects":      matching,
+	}
+	raw, merr := json.Marshal(summary)
+	if merr != nil {
+		return merr
+	}
+	if _, err := e.store.CreateStateSnapshot(ctx, runID, stepID, eventID, snapshotType, aggregateID, raw); err != nil {
+		return fmt.Errorf("create state snapshot: %w", err)
+	}
+	return nil
 }
 
 func (e *defaultExecutor) waitForEffects(ctx context.Context, runID string) error {

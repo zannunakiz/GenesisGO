@@ -156,5 +156,36 @@ func (s *Store) TransitionRun(ctx context.Context, input TransitionInput) (*Run,
 	return TransitionRun(ctx, s.pool, input)
 }
 
+// CancelRun is the Store method form of CancelRun.
+func (s *Store) CancelRun(ctx context.Context, runID string, expectedVersion int32, reason string) (*Run, error) {
+	return CancelRun(ctx, s.pool, runID, expectedVersion, reason)
+}
+
 // Ensure pgx.Tx satisfies queryer for transactional transitions.
 var _ queryer = (pgx.Tx)(nil)
+
+// CancelRun transitions a run from running or pending to cancelled. It is a
+// no-op if the run is already terminal. Returns the updated run.
+func CancelRun(ctx context.Context, q queryer, runID string, expectedVersion int32, reason string) (*Run, error) {
+	run, err := GetRun(ctx, q, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRunNotFound
+		}
+		return nil, err
+	}
+	if IsTerminal(RunState(run.Status)) {
+		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", ErrInvalidTransition, runID, run.Status)
+	}
+	from := RunState(run.Status)
+	if from != RunStateRunning && from != RunStatePending {
+		return nil, fmt.Errorf("%w: run %q is %q, expected %q or %q", ErrInvalidTransition, runID, run.Status, RunStateRunning, RunStatePending)
+	}
+	return TransitionRun(ctx, q, TransitionInput{
+		RunID:           runID,
+		From:            from,
+		To:              RunStateCancelled,
+		Reason:          reason,
+		ExpectedVersion: expectedVersion,
+	})
+}

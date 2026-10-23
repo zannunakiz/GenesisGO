@@ -110,6 +110,20 @@ type DiagnosisReport struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
+// StateSnapshot captures a safe before/after state summary for a single
+// event delivery within a run. Only non-sensitive summary data is stored;
+// full raw payloads are intentionally omitted.
+type StateSnapshot struct {
+	ID           string     `json:"id"`
+	RunID        string     `json:"run_id"`
+	StepID       string     `json:"step_id"`
+	EventID      string     `json:"event_id"`
+	SnapshotType string     `json:"snapshot_type"` // "before" or "after"
+	AggregateID  string     `json:"aggregate_id"`
+	StateSummary []byte     `json:"state_summary,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
 // Scan helpers map pgx rows onto models. NULLable columns scan into nil
 // pointers; JSONB columns scan into raw bytes.
 
@@ -187,6 +201,17 @@ func scanDiagnosisReport(row pgx.Row) (*DiagnosisReport, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func scanStateSnapshot(row pgx.Row) (*StateSnapshot, error) {
+	var s StateSnapshot
+	if err := row.Scan(
+		&s.ID, &s.RunID, &s.StepID, &s.EventID, &s.SnapshotType,
+		&s.AggregateID, &s.StateSummary, &s.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 // ---- scenarios ----------------------------------------------------------
@@ -548,6 +573,112 @@ func (s *Store) ListEventAttemptsByRun(ctx context.Context, runID string) ([]*Ev
 	return ListEventAttemptsByRun(ctx, s.pool, runID)
 }
 
+// CountEventAttemptsByRun returns the total number of event attempts recorded
+// for a run. Used to enforce MaxEventsPerRun.
+func CountEventAttemptsByRun(ctx context.Context, q queryer, runID string) (int, error) {
+	const query = `
+		SELECT COUNT(*) FROM event_attempts WHERE run_id = $1
+	`
+	var n int
+	row := q.QueryRow(ctx, query, runID)
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) CountEventAttemptsByRun(ctx context.Context, runID string) (int, error) {
+	return CountEventAttemptsByRun(ctx, s.pool, runID)
+}
+
+// DeleteRunData removes all child-table evidence for a run and then the run
+// itself. All deletes are scoped by run_id so one run's data can never leak
+// into another. Returns the number of runs deleted (0 or 1).
+func DeleteRunData(ctx context.Context, q queryer, runID string) (int64, error) {
+	// Child tables reference runs(id) ON DELETE CASCADE, so deleting the run
+	// row removes all associated evidence. We delete child rows explicitly for
+	// clarity and to support stores without cascade.
+	const deleteAttempts = `DELETE FROM event_attempts WHERE run_id = $1`
+	const deleteEffects = `DELETE FROM side_effect_records WHERE run_id = $1`
+	const deleteInvariants = `DELETE FROM invariant_results WHERE run_id = $1`
+	const deleteJobs = `DELETE FROM run_jobs WHERE run_id = $1`
+	const deleteTransitions = `DELETE FROM run_transitions WHERE run_id = $1`
+	const deleteDiagnosis = `DELETE FROM diagnosis_reports WHERE run_id = $1`
+	const deleteRejected = `DELETE FROM rejected_events WHERE run_id = $1`
+	const deleteSnapshots = `DELETE FROM state_snapshots WHERE run_id = $1`
+	const deleteRun = `DELETE FROM runs WHERE id = $1`
+
+	if _, err := q.Exec(ctx, deleteAttempts, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteEffects, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteInvariants, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteJobs, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteTransitions, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteDiagnosis, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteRejected, runID); err != nil {
+		return 0, err
+	}
+	if _, err := q.Exec(ctx, deleteSnapshots, runID); err != nil {
+		return 0, err
+	}
+	tag, err := q.Exec(ctx, deleteRun, runID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) DeleteRunData(ctx context.Context, runID string) (int64, error) {
+	return DeleteRunData(ctx, s.pool, runID)
+}
+
+// ListRunsOlderThan returns runs whose completed_at is before cutoff, ordered
+// oldest first. Used for retention cleanup of terminal runs.
+func ListRunsOlderThan(ctx context.Context, q queryer, cutoff time.Time) ([]*Run, error) {
+	const query = `
+		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at,
+		       failure_reason, cancellation_reason, attempt_count, version
+		FROM runs
+		WHERE completed_at IS NOT NULL AND completed_at < $1
+		ORDER BY completed_at ASC
+	`
+	rows, err := q.Query(ctx, query, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []*Run{}
+	}
+	return out, nil
+}
+
+func (s *Store) ListRunsOlderThan(ctx context.Context, cutoff time.Time) ([]*Run, error) {
+	return ListRunsOlderThan(ctx, s.pool, cutoff)
+}
+
 // ---- side effect records ------------------------------------------------
 
 // CreateSideEffectRecord records a business effect written by the consumer.
@@ -610,6 +741,67 @@ func ListSideEffectRecordsByRun(ctx context.Context, q queryer, runID string) ([
 
 func (s *Store) ListSideEffectRecordsByRun(ctx context.Context, runID string) ([]*SideEffectRecord, error) {
 	return ListSideEffectRecordsByRun(ctx, s.pool, runID)
+}
+
+// ---- state snapshots -----------------------------------------------------
+
+// CreateStateSnapshot records a safe before/after state summary for an event
+// delivery. Only non-sensitive summary data is stored.
+func CreateStateSnapshot(
+	ctx context.Context,
+	q queryer,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+	stateSummary []byte,
+) (*StateSnapshot, error) {
+	const query = `
+		INSERT INTO state_snapshots (run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary, created_at
+	`
+	row := q.QueryRow(ctx, query, runID, stepID, eventID, snapshotType, aggregateID, stateSummary)
+	return scanStateSnapshot(row)
+}
+
+func (s *Store) CreateStateSnapshot(
+	ctx context.Context,
+	runID, stepID, eventID, snapshotType, aggregateID string,
+	stateSummary []byte,
+) (*StateSnapshot, error) {
+	return CreateStateSnapshot(ctx, s.pool, runID, stepID, eventID, snapshotType, aggregateID, stateSummary)
+}
+
+// ListStateSnapshotsByRun returns state snapshots for a run, oldest first.
+func ListStateSnapshotsByRun(ctx context.Context, q queryer, runID string) ([]*StateSnapshot, error) {
+	const query = `
+		SELECT id, run_id, step_id, event_id, snapshot_type, aggregate_id, state_summary, created_at
+		FROM state_snapshots
+		WHERE run_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := q.Query(ctx, query, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*StateSnapshot
+	for rows.Next() {
+		s, err := scanStateSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []*StateSnapshot{}
+	}
+	return out, nil
+}
+
+func (s *Store) ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*StateSnapshot, error) {
+	return ListStateSnapshotsByRun(ctx, s.pool, runID)
 }
 
 // ---- invariant results --------------------------------------------------

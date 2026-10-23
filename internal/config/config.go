@@ -23,6 +23,8 @@ const (
 	defaultMaxRequestBodySize = 1 << 20
 	defaultLogLevel           = "info"
 	defaultCORSOrigins        = "http://localhost:3000"
+	defaultRetentionPeriod    = 24 * time.Hour
+	defaultMaxRuns            = 1_000
 )
 
 // Config contains validated runtime settings. Secret values must not be logged.
@@ -35,6 +37,8 @@ type Config struct {
 	RunTimeout              time.Duration
 	MaxEventsPerRun         int
 	MaxRequestBodyBytes     int64
+	RetentionPeriod         time.Duration
+	MaxRuns                 int
 	LogLevel                string
 	CORSOrigins             []string
 	APIKeysFile             string
@@ -106,6 +110,15 @@ func loadFrom(get lookup) (Config, error) {
 		return Config{}, err
 	}
 	cfg.MaxRequestBodyBytes = bodySize
+
+	cfg.RetentionPeriod, err = positiveDuration(get, "RETENTION_PERIOD", defaultRetentionPeriod)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxRuns, err = positiveInt(get, "MAX_RUNS", defaultMaxRuns)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg.LogLevel = strings.ToLower(value(get, "LOG_LEVEL", defaultLogLevel))
 	switch cfg.LogLevel {

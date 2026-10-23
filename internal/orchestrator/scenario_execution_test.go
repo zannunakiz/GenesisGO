@@ -101,6 +101,10 @@ func (f *fakeBroker) Close() error {
 	return nil
 }
 
+func (f *fakeBroker) DeleteConsumer(_ context.Context, _ string) error {
+	return nil
+}
+
 func (f *fakeBroker) Ready() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -626,3 +630,116 @@ func TestWorkerRestartRecoversWithoutDuplicate(t *testing.T) {
 		t.Fatalf("expected idempotency_key_unique to pass, got %q", got)
 	}
 }
+
+
+func TestStateSnapshotsCapturedForDelivery(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, duplicateDeliveryFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "duplicate_delivery")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	// Verify before/after snapshots were captured for each delivery.
+	snaps, err := st.ListStateSnapshotsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list state snapshots: %v", err)
+	}
+	if len(snaps) == 0 {
+		t.Fatal("expected state snapshots to be captured, got none")
+	}
+	// Each delivery should have a before and after snapshot.
+	beforeCount := 0
+	afterCount := 0
+	for _, s := range snaps {
+		switch s.SnapshotType {
+		case "before":
+			beforeCount++
+		case "after":
+			afterCount++
+		default:
+			t.Fatalf("unexpected snapshot type %q", s.SnapshotType)
+		}
+		if s.AggregateID == "" {
+			t.Fatalf("snapshot missing aggregate_id: %+v", s)
+		}
+		if s.StateSummary == nil {
+			t.Fatalf("snapshot missing state_summary: %+v", s)
+		}
+	}
+	t.Logf("captured %d before and %d after snapshots", beforeCount, afterCount)
+	if beforeCount == 0 || afterCount == 0 {
+		t.Fatalf("expected both before and after snapshots, got before=%d after=%d", beforeCount, afterCount)
+	}
+}
+
+
+func TestNotEvaluatedOnExecutionFailure(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, unknownEventFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "unknown_event")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateFailed))
+
+	// Declared invariants must be not_evaluated when execution fails.
+	results, err := st.ListInvariantResultsByRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("list invariant results: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected invariant results, got none")
+	}
+	for _, r := range results {
+		if r.Verdict != string(invariants.StatusNotEvaluated) {
+			t.Fatalf("expected not_evaluated for invariant %q, got %q", r.InvariantKey, r.Verdict)
+		}
+	}
+}
+
+func TestNotEvaluatedForUndeclaredRules(t *testing.T) {
+	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, duplicateDeliveryFixture)
+
+	run, err := o.EnqueueScenario(context.Background(), "duplicate_delivery")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.ExecuteRun(ctx, run.ID); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	assertRunStatus(t, st, run.ID, string(store.RunStateCompleted))
+
+	// Declared invariants should pass.
+	for _, key := range []string{"no_duplicate_payment", "idempotency_key_unique"} {
+		if got := invariantVerdict(t, st, run.ID, key); got != "pass" {
+			t.Fatalf("expected %q to pass, got %q", key, got)
+		}
+	}
+
+	// Undeclared rules (e.g. no_negative_inventory, allowed_order_transition)
+	// should be not_evaluated.
+	for _, key := range []string{"no_negative_inventory", "allowed_order_transition"} {
+		if got := invariantVerdict(t, st, run.ID, key); got != string(invariants.StatusNotEvaluated) {
+			t.Fatalf("expected %q to be not_evaluated, got %q", key, got)
+		}
+	}
+}
+
+
