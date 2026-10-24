@@ -13,6 +13,7 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/app"
 	"github.com/zannunakiz/GenesisGO/internal/auth"
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
+	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
 
@@ -75,7 +76,7 @@ func TestListScenariosSuccess(t *testing.T) {
 	}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/scenarios", nil)
 	req.Header.Set("Authorization", authHeader(secret))
@@ -105,7 +106,7 @@ func TestListScenariosRequiresAuth(t *testing.T) {
 		t.Fatalf("new memory store: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/scenarios", nil)
 	rec := httptest.NewRecorder()
@@ -127,7 +128,7 @@ func TestCreateRunSuccess(t *testing.T) {
 	uc := &fakeUseCases{createRun: createdRun, created: true}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	body := strings.NewReader(`{"scenario_key":"duplicate_delivery"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", body)
@@ -147,7 +148,7 @@ func TestCreateRunValidationError(t *testing.T) {
 	uc := &fakeUseCases{}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	body := strings.NewReader(`{}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", body)
@@ -165,7 +166,7 @@ func TestCreateRunRequiresRunScope(t *testing.T) {
 	uc := &fakeUseCases{}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	body := strings.NewReader(`{"scenario_key":"duplicate_delivery"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", body)
@@ -182,7 +183,7 @@ func TestCreateRunUnknownScenario(t *testing.T) {
 	uc := &fakeUseCases{createErr: orchestrator.ErrScenarioNotFound}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	body := strings.NewReader(`{"scenario_key":"missing"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", body)
@@ -207,7 +208,7 @@ func TestCreateRunIdempotency(t *testing.T) {
 	uc := &fakeUseCases{createRun: run, created: true}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	body := strings.NewReader(`{"scenario_key":"duplicate_delivery"}`)
 
@@ -244,7 +245,7 @@ func TestListRunsSuccess(t *testing.T) {
 	}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs?scenario_id=scenario-a&limit=10&offset=0", nil)
 	req.Header.Set("Authorization", authHeader(secret))
@@ -275,7 +276,7 @@ func TestListRunsRequiresAuth(t *testing.T) {
 		t.Fatalf("new memory store: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs?scenario_id=x", nil)
 	rec := httptest.NewRecorder()
@@ -298,7 +299,7 @@ func TestGetRunSuccess(t *testing.T) {
 	}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-1", nil)
 	req.Header.Set("Authorization", authHeader(secret))
@@ -323,7 +324,7 @@ func TestGetRunNotFound(t *testing.T) {
 	uc := &fakeUseCases{getErr: pgx.ErrNoRows}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
 	mux := http.NewServeMux()
-	Register(mux, uc, st)
+	Register(mux, uc, st, sse.NewHub(10))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/no-such-run", nil)
 	req.Header.Set("Authorization", authHeader(secret))

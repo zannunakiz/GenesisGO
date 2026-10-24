@@ -7,7 +7,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/app"
 	"github.com/zannunakiz/GenesisGO/internal/auth"
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
+	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
 
@@ -37,11 +40,12 @@ type useCases interface {
 
 // Register wires run and scenario endpoints onto mux. Control-plane routes are
 // protected by RequireAuth; health endpoints remain unauthenticated.
-func Register(mux *http.ServeMux, uc useCases, authStore auth.Store) {
+func Register(mux *http.ServeMux, uc useCases, authStore auth.Store, hub *sse.Hub) {
 	mux.Handle("GET /api/v1/scenarios", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleListScenarios(uc))))
 	mux.Handle("POST /api/v1/runs", RequireAuth(authStore, auth.ScopeRun)(http.HandlerFunc(handleCreateRun(uc))))
 	mux.Handle("GET /api/v1/runs", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleListRuns(uc))))
 	mux.Handle("GET /api/v1/runs/{id}", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleGetRun(uc))))
+	mux.Handle("GET /api/v1/runs/{id}/events", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleSSEEvents(hub))))
 }
 
 // handleListScenarios lists built-in scenarios.
@@ -165,5 +169,51 @@ func handleGetRun(uc useCases) http.HandlerFunc {
 			return
 		}
 		WriteJSON(w, r, http.StatusOK, map[string]any{"run": run})
+	}
+}
+
+// handleSSEEvents streams run-scoped lifecycle events via Server-Sent Events.
+// It authenticates the caller, subscribes to the run's event hub, and writes
+// events as text/event-stream until the client disconnects or the context is
+// cancelled. Heartbeats keep idle connections alive.
+func handleSSEEvents(hub *sse.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.PathValue("id"))
+		if id == "" {
+			NotFound(w, r, "run not found")
+			return
+		}
+
+		// SSE requires a persistent connection; disable buffering.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		// Support Last-Event-ID for reconnection replay.
+		lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+
+		ch := hub.Subscribe(id, lastEventID)
+		defer hub.Unsubscribe(ch)
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				payload, err := json.Marshal(ev)
+				if err != nil {
+					continue
+				}
+				_, _ = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", ev.ID, payload)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		}
 	}
 }
