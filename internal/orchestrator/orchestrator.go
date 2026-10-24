@@ -122,14 +122,15 @@ type Config struct {
 
 // Orchestrator schedules and executes run jobs. It is safe for concurrent use.
 type Orchestrator struct {
-	cfg   Config
-	log   *slog.Logger
-	owner string // unique owner prefix for leases claimed by StartWorkers
+	cfg          Config
+	log          *slog.Logger
+	owner        string // unique owner prefix for leases claimed by StartWorkers
 
-	mu        sync.Mutex
-	executing map[string]*atomic.Bool // runID -> job in progress (defense in depth)
-	workers   sync.WaitGroup
-	stop      atomic.Bool
+	mu          sync.Mutex
+	executing   map[string]*atomic.Bool      // runID -> job in progress (defense in depth)
+	cancelSignals map[string]context.CancelFunc // runID -> cancel func for in-flight execution
+	workers     sync.WaitGroup
+	stop        atomic.Bool
 }
 
 // pgxErrNoRows is aliased so the package can distinguish a missing row from
@@ -185,6 +186,7 @@ func New(cfg Config) (*Orchestrator, error) {
 		log:       log,
 		owner:     fmt.Sprintf("orchestrator-%d", time.Now().UnixNano()),
 		executing: make(map[string]*atomic.Bool),
+		cancelSignals: make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -261,7 +263,19 @@ func (o *Orchestrator) ExecuteRun(ctx context.Context, runID string) (*store.Run
 	}
 	defer inProgress.Store(false)
 
-	return o.executeJob(ctx, run)
+	// Create a cancelable context so CancelRun can signal downstream work.
+	execCtx, cancel := context.WithCancel(ctx)
+	o.mu.Lock()
+	o.cancelSignals[runID] = cancel
+	o.mu.Unlock()
+	defer func() {
+		o.mu.Lock()
+		delete(o.cancelSignals, runID)
+		o.mu.Unlock()
+		cancel()
+	}()
+
+	return o.executeJob(execCtx, run)
 }
 
 // StartWorkers spawns n workers that continuously claim queued run jobs and
@@ -520,6 +534,13 @@ func (o *Orchestrator) CancelRun(ctx context.Context, runID string) (*store.Run,
 	if err != nil {
 		return nil, err
 	}
+	// Signal downstream work to stop via context cancellation.
+	o.mu.Lock()
+	if cancel, ok := o.cancelSignals[runID]; ok {
+		cancel()
+		delete(o.cancelSignals, runID)
+	}
+	o.mu.Unlock()
 	if job, jerr := o.currentJob(ctx, runID); jerr == nil {
 		_ = o.cfg.Store.UpdateRunJobStatus(context.Background(), job.ID, "cancelled")
 	}

@@ -36,6 +36,7 @@ type useCases interface {
 	CreateRun(ctx context.Context, in app.CreateRunInput) (*store.Run, bool, error)
 	ListRuns(ctx context.Context, in app.ListRunsInput) ([]app.RunSummary, int, error)
 	GetRun(ctx context.Context, id string) (*store.Run, error)
+	CancelRun(ctx context.Context, id string) (*store.Run, error)
 }
 
 // Register wires run and scenario endpoints onto mux. Control-plane routes are
@@ -45,6 +46,7 @@ func Register(mux *http.ServeMux, uc useCases, authStore auth.Store, hub *sse.Hu
 	mux.Handle("POST /api/v1/runs", RequireAuth(authStore, auth.ScopeRun)(http.HandlerFunc(handleCreateRun(uc))))
 	mux.Handle("GET /api/v1/runs", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleListRuns(uc))))
 	mux.Handle("GET /api/v1/runs/{id}", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleGetRun(uc))))
+	mux.Handle("POST /api/v1/runs/{id}/cancel", RequireAuth(authStore, auth.ScopeRun)(http.HandlerFunc(handleCancelRun(uc))))
 	mux.Handle("GET /api/v1/runs/{id}/events", RequireAuth(authStore, auth.ScopeRead)(http.HandlerFunc(handleSSEEvents(hub))))
 }
 
@@ -215,5 +217,33 @@ func handleSSEEvents(hub *sse.Hub) http.HandlerFunc {
 				}
 			}
 		}
+	}
+}
+
+// handleCancelRun cancels a queued or running run. It transitions the run to
+// cancelled and signals downstream work to stop via context cancellation.
+func handleCancelRun(uc useCases) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.PathValue("id"))
+		if id == "" {
+			NotFound(w, r, "run not found")
+			return
+		}
+
+		run, err := uc.CancelRun(r.Context(), id)
+		if err != nil {
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				NotFound(w, r, "run not found")
+			case errors.Is(err, orchestrator.ErrRunNotFound):
+				NotFound(w, r, "run not found")
+			case errors.Is(err, store.ErrInvalidTransition):
+				Conflict(w, r, "run is already terminal or cannot be cancelled")
+			default:
+				Internal(w, r, err)
+			}
+			return
+		}
+		WriteJSON(w, r, http.StatusOK, map[string]any{"run": run})
 	}
 }

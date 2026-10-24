@@ -62,6 +62,11 @@ type runCreator interface {
 	EnqueueScenario(ctx context.Context, scenarioKey string) (*store.Run, error)
 }
 
+// cancelRunner cancels a running or pending run.
+type cancelRunner interface {
+	CancelRun(ctx context.Context, runID string) (*store.Run, error)
+}
+
 // idempotencyStore is a process-scoped cache for run creation idempotency keys.
 type idempotencyStore struct {
 	mu sync.Mutex
@@ -90,15 +95,17 @@ type UseCases struct {
 	scenarios   scenarioLister
 	runs        runStore
 	creator     runCreator
+	canceler    cancelRunner
 	idempotency *idempotencyStore
 }
 
 // NewUseCases builds application use cases from their dependencies.
-func NewUseCases(scenarios scenarioLister, runs runStore, creator runCreator) *UseCases {
+func NewUseCases(scenarios scenarioLister, runs runStore, creator runCreator, canceler cancelRunner) *UseCases {
 	return &UseCases{
 		scenarios:   scenarios,
 		runs:        runs,
 		creator:     creator,
+		canceler:    canceler,
 		idempotency: newIdempotencyStore(),
 	}
 }
@@ -193,6 +200,13 @@ func (u *UseCases) ListRuns(ctx context.Context, in ListRunsInput) ([]RunSummary
 // GetRun returns a run by ID.
 func (u *UseCases) GetRun(ctx context.Context, id string) (*store.Run, error) {
 	return u.runs.GetRun(ctx, id)
+}
+
+// CancelRun cancels a queued or running run. It returns the updated run with
+// status set to cancelled and the cancellation reason persisted. Calling cancel
+// on an already-terminal run returns an error.
+func (u *UseCases) CancelRun(ctx context.Context, id string) (*store.Run, error) {
+	return u.canceler.CancelRun(ctx, id)
 }
 
 // Sentinel errors returned by use cases.

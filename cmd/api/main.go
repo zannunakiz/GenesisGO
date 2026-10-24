@@ -90,7 +90,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create orchestrator: %w", err)
 	}
 
-	uc := app.NewUseCases(loader, st, o)
+	uc := app.NewUseCases(loader, st, o, o)
 	hub := sse.NewHub(100)
 
 	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})

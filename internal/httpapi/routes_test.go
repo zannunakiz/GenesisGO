@@ -29,6 +29,9 @@ type fakeUseCases struct {
 	listErr   error
 	getRun    *store.Run
 	getErr    error
+	cancelRun *store.Run
+	cancelErr error
+	cancelID  string
 }
 
 func (f *fakeUseCases) ListScenarios(ctx context.Context) ([]app.ScenarioSummary, error) {
@@ -45,6 +48,11 @@ func (f *fakeUseCases) ListRuns(ctx context.Context, in app.ListRunsInput) ([]ap
 
 func (f *fakeUseCases) GetRun(ctx context.Context, id string) (*store.Run, error) {
 	return f.getRun, f.getErr
+}
+
+func (f *fakeUseCases) CancelRun(ctx context.Context, id string) (*store.Run, error) {
+	f.cancelID = id
+	return f.cancelRun, f.cancelErr
 }
 
 func newAuthStoreWithKey(t *testing.T, scopes []string) (*auth.MemoryStore, string) {
@@ -335,4 +343,111 @@ func TestGetRunNotFound(t *testing.T) {
 		t.Fatalf("expected 404, got %d", rec.Code)
 	}
 }
+
+func TestCancelRunSuccess(t *testing.T) {
+	cancelledRun := &store.Run{
+		ID:               "run-1",
+		ScenarioID:       "scenario-a",
+		Status:           string(store.RunStateCancelled),
+		CancellationReason: strPtr("cancelled via API"),
+		AttemptCount:     3,
+		Version:          2,
+	}
+	uc := &fakeUseCases{cancelRun: cancelledRun}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/run-1/cancel", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body struct {
+		Run *store.Run `json:"run"`
+	}
+	if err := json.NewDecoder(rec.Result().Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Run.ID != "run-1" {
+		t.Fatalf("expected run-1, got %q", body.Run.ID)
+	}
+	if body.Run.Status != string(store.RunStateCancelled) {
+		t.Fatalf("expected cancelled status, got %q", body.Run.Status)
+	}
+	if uc.cancelID != "run-1" {
+		t.Fatalf("expected cancelID run-1, got %q", uc.cancelID)
+	}
+}
+
+func TestCancelRunRequiresAuth(t *testing.T) {
+	uc := &fakeUseCases{}
+	st, err := auth.NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/run-1/cancel", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", rec.Code)
+	}
+}
+
+func TestCancelRunRequiresRunScope(t *testing.T) {
+	uc := &fakeUseCases{}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/run-1/cancel", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for read-only key on cancel, got %d", rec.Code)
+	}
+}
+
+func TestCancelRunNotFound(t *testing.T) {
+	uc := &fakeUseCases{cancelErr: pgx.ErrNoRows}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/no-such-run/cancel", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestCancelRunAlreadyTerminal(t *testing.T) {
+	uc := &fakeUseCases{cancelErr: store.ErrInvalidTransition}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs/run-1/cancel", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
