@@ -3,16 +3,20 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/zannunakiz/GenesisGO/internal/app"
 	"github.com/zannunakiz/GenesisGO/internal/auth"
+	"github.com/zannunakiz/GenesisGO/internal/invariants"
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
+	"github.com/zannunakiz/GenesisGO/internal/report"
 	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
@@ -32,6 +36,9 @@ type fakeUseCases struct {
 	cancelRun *store.Run
 	cancelErr error
 	cancelID  string
+	report    *report.Report
+	reportErr error
+	reportID  string
 }
 
 func (f *fakeUseCases) ListScenarios(ctx context.Context) ([]app.ScenarioSummary, error) {
@@ -53,6 +60,11 @@ func (f *fakeUseCases) GetRun(ctx context.Context, id string) (*store.Run, error
 func (f *fakeUseCases) CancelRun(ctx context.Context, id string) (*store.Run, error) {
 	f.cancelID = id
 	return f.cancelRun, f.cancelErr
+}
+
+func (f *fakeUseCases) GetReport(ctx context.Context, runID string) (*report.Report, error) {
+	f.reportID = runID
+	return f.report, f.reportErr
 }
 
 func newAuthStoreWithKey(t *testing.T, scopes []string) (*auth.MemoryStore, string) {
@@ -446,6 +458,164 @@ func TestCancelRunAlreadyTerminal(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+}
+
+func TestGetReportSuccess(t *testing.T) {
+	rep := &report.Report{
+		SchemaVersion: report.SchemaVersion,
+		Run: report.RunSummary{
+			ID:           "run-1",
+			ScenarioID:   "scenario-a",
+			Status:       string(store.RunStateCompleted),
+			AttemptCount: 3,
+			Version:      1,
+		},
+	}
+	uc := &fakeUseCases{report: rep}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-1/report", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("expected application/json content type, got %q", ct)
+	}
+	if uc.reportID != "run-1" {
+		t.Fatalf("expected reportID run-1, got %q", uc.reportID)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Result().Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["schema_version"] != report.SchemaVersion {
+		t.Fatalf("expected schema_version %q, got %v", report.SchemaVersion, body["schema_version"])
+	}
+}
+
+func TestGetReportRequiresAuth(t *testing.T) {
+	uc := &fakeUseCases{}
+	st, err := auth.NewMemoryStore()
+	if err != nil {
+		t.Fatalf("new memory store: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-1/report", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", rec.Code)
+	}
+}
+
+func TestGetReportNotFound(t *testing.T) {
+	uc := &fakeUseCases{reportErr: pgx.ErrNoRows}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/no-such-run/report", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestExportReportJSON(t *testing.T) {
+	rep := &report.Report{
+		SchemaVersion: report.SchemaVersion,
+		Run: report.RunSummary{
+			ID:           "run-1",
+			ScenarioID:   "scenario-a",
+			Status:       string(store.RunStateCompleted),
+			AttemptCount: 3,
+			Version:      1,
+		},
+	}
+	uc := &fakeUseCases{report: rep}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-1/export", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("expected application/json content type, got %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Fatalf("expected attachment disposition, got %q", cd)
+	}
+}
+
+func TestExportReportCSV(t *testing.T) {
+	rep := &report.Report{
+		SchemaVersion: report.SchemaVersion,
+		Run: report.RunSummary{
+			ID:           "run-1",
+			ScenarioID:   "scenario-a",
+			Status:       string(store.RunStateCompleted),
+			AttemptCount: 3,
+			Version:      1,
+		},
+		Timestamps: report.Timestamps{
+			CreatedAt:   time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+			UpdatedAt:   time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+		},
+		InvariantResults: []report.InvariantResultEntry{
+			{InvariantKey: "no_duplicate_payment", Verdict: string(invariants.StatusPass)},
+			{InvariantKey: "no_negative_inventory", Verdict: string(invariants.StatusFail)},
+		},
+	}
+	uc := &fakeUseCases{report: rep}
+	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
+	mux := http.NewServeMux()
+	Register(mux, uc, st, sse.NewHub(10))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/run-1/export.csv", nil)
+	req.Header.Set("Authorization", authHeader(secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/csv") {
+		t.Fatalf("expected text/csv content type, got %q", ct)
+	}
+	body := rec.Result().Body
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	csv := string(data)
+	if !strings.Contains(csv, "run_id,scenario_id,status") {
+		t.Fatalf("expected CSV header, got: %s", csv)
+	}
+	if !strings.Contains(csv, "no_duplicate_payment") {
+		t.Fatalf("expected invariant key in CSV, got: %s", csv)
+	}
+	if !strings.Contains(csv, "pass") {
+		t.Fatalf("expected pass verdict in CSV, got: %s", csv)
 	}
 }
 

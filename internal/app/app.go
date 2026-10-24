@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zannunakiz/GenesisGO/internal/report"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
@@ -67,6 +68,11 @@ type cancelRunner interface {
 	CancelRun(ctx context.Context, runID string) (*store.Run, error)
 }
 
+// reportGenerator generates a reproducible run report from persisted evidence.
+type reportGenerator interface {
+	GenerateReport(ctx context.Context, runID string) (*report.Report, error)
+}
+
 // idempotencyStore is a process-scoped cache for run creation idempotency keys.
 type idempotencyStore struct {
 	mu sync.Mutex
@@ -96,16 +102,18 @@ type UseCases struct {
 	runs        runStore
 	creator     runCreator
 	canceler    cancelRunner
+	reportGen   reportGenerator
 	idempotency *idempotencyStore
 }
 
 // NewUseCases builds application use cases from their dependencies.
-func NewUseCases(scenarios scenarioLister, runs runStore, creator runCreator, canceler cancelRunner) *UseCases {
+func NewUseCases(scenarios scenarioLister, runs runStore, creator runCreator, canceler cancelRunner, reportGen reportGenerator) *UseCases {
 	return &UseCases{
 		scenarios:   scenarios,
 		runs:        runs,
 		creator:     creator,
 		canceler:    canceler,
+		reportGen:   reportGen,
 		idempotency: newIdempotencyStore(),
 	}
 }
@@ -207,6 +215,13 @@ func (u *UseCases) GetRun(ctx context.Context, id string) (*store.Run, error) {
 // on an already-terminal run returns an error.
 func (u *UseCases) CancelRun(ctx context.Context, id string) (*store.Run, error) {
 	return u.canceler.CancelRun(ctx, id)
+}
+
+// GetReport returns a reproducible, versioned run report regenerated from
+// persisted evidence. The report is deterministic apart from explicitly
+// documented timestamps and identifiers, and contains no sensitive data.
+func (u *UseCases) GetReport(ctx context.Context, runID string) (*report.Report, error) {
+	return u.reportGen.GenerateReport(ctx, runID)
 }
 
 // Sentinel errors returned by use cases.

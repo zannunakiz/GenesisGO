@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
+	"github.com/zannunakiz/GenesisGO/internal/report"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
@@ -141,6 +142,16 @@ func (f *fakeRunCanceler) CancelRun(ctx context.Context, runID string) (*store.R
 
 func strPtr(s string) *string { return &s }
 
+// fakeReportGenerator returns a fixed report for testing.
+type fakeReportGenerator struct {
+	rep *report.Report
+	err error
+}
+
+func (f *fakeReportGenerator) GenerateReport(ctx context.Context, runID string) (*report.Report, error) {
+	return f.rep, f.err
+}
+
 func TestListScenariosReturnsSortedSummaries(t *testing.T) {
 	loader := &fakeScenarioLoader{
 		fixtures: map[string]*scenarios.Scenario{
@@ -148,7 +159,7 @@ func TestListScenariosReturnsSortedSummaries(t *testing.T) {
 			"alpha": {Key: "alpha", Version: 1, Name: "Alpha Scenario", Description: "desc a"},
 		},
 	}
-	uc := NewUseCases(loader, newFakeRunStore(), &fakeRunCreator{}, newFakeRunCanceler(newFakeRunStore()))
+	uc := NewUseCases(loader, newFakeRunStore(), &fakeRunCreator{}, newFakeRunCanceler(newFakeRunStore()), &fakeReportGenerator{})
 
 	list, err := uc.ListScenarios(context.Background())
 	if err != nil {
@@ -164,7 +175,7 @@ func TestListScenariosReturnsSortedSummaries(t *testing.T) {
 
 func TestListScenariosPropagatesLoaderError(t *testing.T) {
 	loader := &fakeScenarioLoader{err: errors.New("load failed")}
-	uc := NewUseCases(loader, newFakeRunStore(), &fakeRunCreator{}, newFakeRunCanceler(newFakeRunStore()))
+	uc := NewUseCases(loader, newFakeRunStore(), &fakeRunCreator{}, newFakeRunCanceler(newFakeRunStore()), &fakeReportGenerator{})
 
 	if _, err := uc.ListScenarios(context.Background()); err == nil {
 		t.Fatal("expected loader error to propagate")
@@ -175,7 +186,7 @@ func TestCreateRunCreatesNewRun(t *testing.T) {
 	st := newFakeRunStore()
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	run, created, err := uc.CreateRun(context.Background(), CreateRunInput{ScenarioKey: "duplicate_delivery"})
 	if err != nil {
@@ -196,7 +207,7 @@ func TestCreateRunRejectsUnknownScenario(t *testing.T) {
 	st := newFakeRunStore()
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	_, _, err := uc.CreateRun(context.Background(), CreateRunInput{ScenarioKey: "missing"})
 	if !errors.Is(err, orchestrator.ErrScenarioNotFound) {
@@ -208,7 +219,7 @@ func TestCreateRunIdempotencyKeyReturnsSameRun(t *testing.T) {
 	st := newFakeRunStore()
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	run1, created1, err := uc.CreateRun(context.Background(), CreateRunInput{
 		ScenarioKey:    "duplicate_delivery",
@@ -243,7 +254,7 @@ func TestCreateRunWithoutIdempotencyKeyCreatesNewRunEachTime(t *testing.T) {
 	st := newFakeRunStore()
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	_, c1, err := uc.CreateRun(context.Background(), CreateRunInput{ScenarioKey: "duplicate_delivery"})
 	if err != nil || !c1 {
@@ -263,7 +274,7 @@ func TestListRunsPaginates(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		st.addRun("scenario-a", string(store.RunStatePending))
 	}
-	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st))
+	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
 	list, total, err := uc.ListRuns(context.Background(), ListRunsInput{
 		ScenarioID: "scenario-a",
@@ -286,7 +297,7 @@ func TestListRunsRespectsMaxLimit(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		st.addRun("scenario-a", string(store.RunStatePending))
 	}
-	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st))
+	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
 	list, _, err := uc.ListRuns(context.Background(), ListRunsInput{
 		ScenarioID: "scenario-a",
@@ -304,7 +315,7 @@ func TestListRunsWithoutScenarioFilterListsAll(t *testing.T) {
 	st := newFakeRunStore()
 	st.addRun("scenario-a", string(store.RunStatePending))
 	st.addRun("scenario-b", string(store.RunStatePending))
-	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st))
+	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
 	list, total, err := uc.ListRuns(context.Background(), ListRunsInput{})
 	if err != nil {
@@ -321,7 +332,7 @@ func TestListRunsWithoutScenarioFilterListsAll(t *testing.T) {
 func TestGetRunReturnsRun(t *testing.T) {
 	st := newFakeRunStore()
 	run := st.addRun("scenario-a", string(store.RunStatePending))
-	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st))
+	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
 	got, err := uc.GetRun(context.Background(), run.ID)
 	if err != nil {
@@ -334,7 +345,7 @@ func TestGetRunReturnsRun(t *testing.T) {
 
 func TestGetRunReturnsNotFoundForMissing(t *testing.T) {
 	st := newFakeRunStore()
-	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st))
+	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
 	if _, err := uc.GetRun(context.Background(), "no-such-run"); !errors.Is(err, pgxErrNoRows) {
 		t.Fatalf("expected pgxErrNoRows, got %v", err)
@@ -346,7 +357,7 @@ func TestCancelRunBeforeStart(t *testing.T) {
 	run := st.addRun("scenario-a", string(store.RunStatePending))
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	cancelled, err := uc.CancelRun(context.Background(), run.ID)
 	if err != nil {
@@ -368,7 +379,7 @@ func TestCancelRunDuringRun(t *testing.T) {
 	run := st.addRun("scenario-a", string(store.RunStateRunning))
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	cancelled, err := uc.CancelRun(context.Background(), run.ID)
 	if err != nil {
@@ -384,7 +395,7 @@ func TestCancelRunAlreadyTerminal(t *testing.T) {
 	run := st.addRun("scenario-a", string(store.RunStateCompleted))
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	if _, err := uc.CancelRun(context.Background(), run.ID); !errors.Is(err, store.ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition for terminal run, got %v", err)
@@ -395,7 +406,7 @@ func TestCancelRunNotFound(t *testing.T) {
 	st := newFakeRunStore()
 	creator := &fakeRunCreator{store: st}
 	canceler := newFakeRunCanceler(st)
-	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler)
+	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
 	if _, err := uc.CancelRun(context.Background(), "no-such-run"); !errors.Is(err, pgxErrNoRows) {
 		t.Fatalf("expected pgxErrNoRows for missing run, got %v", err)

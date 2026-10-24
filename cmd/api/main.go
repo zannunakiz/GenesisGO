@@ -19,6 +19,7 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/observability"
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
 	"github.com/zannunakiz/GenesisGO/internal/protection"
+	"github.com/zannunakiz/GenesisGO/internal/report"
 	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/sampleconsumer"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
@@ -90,7 +91,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create orchestrator: %w", err)
 	}
 
-	uc := app.NewUseCases(loader, st, o, o)
+	uc := app.NewUseCases(loader, st, o, o, &reportGen{store: st})
 	hub := sse.NewHub(100)
 
 	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
@@ -186,4 +187,13 @@ func loadAuthStore(cfg config.Config) (auth.Store, error) {
 		return nil, fmt.Errorf("no API keys are configured; bootstrap one before starting production")
 	}
 	return store, nil
+}
+
+// reportGen adapts store.Store to the app.reportGenerator interface.
+type reportGen struct {
+	store *store.Store
+}
+
+func (g *reportGen) GenerateReport(ctx context.Context, runID string) (*report.Report, error) {
+	return report.GenerateReport(ctx, g.store, runID)
 }
