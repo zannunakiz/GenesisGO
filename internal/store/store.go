@@ -361,6 +361,39 @@ func (s *Store) ListRunsByScenario(ctx context.Context, scenarioID string) ([]*R
 	return ListRunsByScenario(ctx, s.pool, scenarioID)
 }
 
+// ListRuns returns all runs, newest first.
+func ListRuns(ctx context.Context, q queryer) ([]*Run, error) {
+	const query = `
+		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
+		FROM runs
+		ORDER BY created_at DESC
+	`
+	rows, err := q.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []*Run{}
+	}
+	return out, nil
+}
+
+func (s *Store) ListRuns(ctx context.Context) ([]*Run, error) {
+	return ListRuns(ctx, s.pool)
+}
+
 // ---- run jobs -----------------------------------------------------------
 
 // CreateRunJob inserts a bounded unit of work for a run.
