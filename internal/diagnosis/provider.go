@@ -10,6 +10,8 @@ package diagnosis
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -70,11 +72,50 @@ type StateDiffSummary struct {
 	AggregateID string `json:"aggregate_id"`
 }
 
-// Result is the provider's hypothesis. Fields may be nil when unavailable.
+// Result is the provider's hypothesis. Every field is a hypothesis, never a
+// ground-truth verdict: AI output can never override invariant pass/fail.
+// Fields may be nil/empty when unavailable. The JSON shape of this struct is
+// the diagnosis schema: summary, probable_causes, cited_evidence_ids,
+// suggested_follow_up_scenarios, confidence_rationale, model, created_at.
 type Result struct {
-	Summary     *string  `json:"summary,omitempty"`
-	Suggestions []string `json:"suggestions,omitempty"`
-	Model       *string  `json:"model,omitempty"`
+	// Summary is a one-paragraph hypothesis explaining the run outcome.
+	Summary *string `json:"summary,omitempty"`
+	// ProbableCauses lists hypothesized root causes for any failed invariants.
+	ProbableCauses []string `json:"probable_causes,omitempty"`
+	// CitedEvidenceIDs lists run evidence IDs the hypothesis references. Every
+	// ID must correspond to real persisted evidence; fabricated references are
+	// rejected by Validate.
+	CitedEvidenceIDs []string `json:"cited_evidence_ids,omitempty"`
+	// SuggestedFollowUpScenarios lists scenarios the operator may want to run next.
+	SuggestedFollowUpScenarios []string `json:"suggested_follow_up_scenarios,omitempty"`
+	// ConfidenceRationale explains why the model is confident (or not) in the hypothesis.
+	ConfidenceRationale *string `json:"confidence_rationale,omitempty"`
+	// Model is the model that produced the diagnosis.
+	Model *string `json:"model,omitempty"`
 	// CreatedAt records when the diagnosis was generated.
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Validate checks the diagnosis result against the run's known evidence IDs.
+// All AI output is treated as untrusted input: this method only inspects the
+// data, it never executes or acts on it. It rejects fabricated evidence
+// references (cited IDs that are not part of this run) and empty cited IDs.
+// A nil result is invalid.
+func (r *Result) Validate(knownEvidenceIDs []string) error {
+	if r == nil {
+		return errors.New("diagnosis result is required")
+	}
+	known := make(map[string]struct{}, len(knownEvidenceIDs))
+	for _, id := range knownEvidenceIDs {
+		known[id] = struct{}{}
+	}
+	for _, id := range r.CitedEvidenceIDs {
+		if id == "" {
+			return errors.New("cited evidence id must not be empty")
+		}
+		if _, ok := known[id]; !ok {
+			return fmt.Errorf("cited evidence id %q is not part of this run", id)
+		}
+	}
+	return nil
 }

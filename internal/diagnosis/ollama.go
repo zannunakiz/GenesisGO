@@ -35,10 +35,14 @@ type ollamaChatResponse struct {
 	CreatedAt string        `json:"created_at,omitempty"`
 }
 
-// ollamaDiagnosis is the structured JSON we ask the model to return.
+// ollamaDiagnosis is the structured JSON we ask the model to return. Every
+// field is a hypothesis, never a ground-truth verdict.
 type ollamaDiagnosis struct {
-	Summary     string   `json:"summary"`
-	Suggestions []string `json:"suggestions,omitempty"`
+	Summary                    string   `json:"summary"`
+	ProbableCauses             []string `json:"probable_causes,omitempty"`
+	CitedEvidenceIDs           []string `json:"cited_evidence_ids,omitempty"`
+	SuggestedFollowUpScenarios []string `json:"suggested_follow_up_scenarios,omitempty"`
+	ConfidenceRationale        string   `json:"confidence_rationale,omitempty"`
 }
 
 // OllamaProvider calls a local Ollama server over HTTP to produce an optional
@@ -146,7 +150,10 @@ func (p *OllamaProvider) Diagnose(ctx context.Context, in Input) (*Result, error
 	}
 	if diag, err := parseDiagnosis([]byte(content)); err == nil {
 		result.Summary = &diag.Summary
-		result.Suggestions = diag.Suggestions
+		result.ProbableCauses = diag.ProbableCauses
+		result.CitedEvidenceIDs = diag.CitedEvidenceIDs
+		result.SuggestedFollowUpScenarios = diag.SuggestedFollowUpScenarios
+		result.ConfidenceRationale = &diag.ConfidenceRationale
 	}
 
 	return result, nil
@@ -158,13 +165,15 @@ func marshalInput(in Input) ([]byte, error) {
 }
 
 // systemPrompt returns the system instruction given to Ollama. It keeps the
-// model within bounds: hypotheses only, no tool use, no state changes.
+// model within bounds: hypotheses only, no shell commands, no tool use, no
+// state changes, and no extra execution. All output must cite only real
+// evidence IDs and must never override deterministic invariant verdicts.
 func systemPrompt() string {
 	return `You are a diagnostic assistant for GenesisGo, a reliability testing tool.
 You receive ONLY observed run evidence: invariant failures, event timeline, fault points, and safe before/after state diffs.
-Your output is a hypothesis, never a ground-truth verdict. Do not change run state, invariant outcomes, or trigger execution.
-Return JSON only, with fields: summary (string), suggestions (array of strings, optional).
-Keep it concise, cite evidence by run/scenario IDs, and do not invent evidence IDs or raw payloads.`
+Your output is a hypothesis, never a ground-truth verdict. Do not issue shell commands, do not invoke tools, do not change run state or invariant outcomes, and do not trigger extra execution.
+Return JSON only, with fields: summary (string), probable_causes (array of strings), cited_evidence_ids (array of strings that reference real run evidence only), suggested_follow_up_scenarios (array of strings, optional), confidence_rationale (string, optional).
+Keep it concise, cite evidence by run/scenario IDs, do not invent evidence IDs or raw payloads, and label all statements as hypotheses.`
 }
 
 // parseDiagnosis attempts to decode structured JSON from the model output.
