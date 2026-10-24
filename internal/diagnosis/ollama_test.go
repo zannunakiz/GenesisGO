@@ -149,6 +149,20 @@ func TestOllamaEmptyContentReturnsError(t *testing.T) {
 	}
 }
 
+func TestOllamaOversizedOutputReturnsError(t *testing.T) {
+	srv := newOversizedStub().Server()
+	defer srv.Close()
+
+	p := NewOllamaProvider(srv.URL, "test-model", 10*time.Second)
+	res, err := p.Diagnose(context.Background(), Input{RunID: "run-1"})
+	if err == nil {
+		t.Fatal("expected error for oversized ollama output")
+	}
+	if res != nil {
+		t.Fatalf("expected nil result for oversized output, got %v", res)
+	}
+}
+
 func TestOllamaTimeout(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
