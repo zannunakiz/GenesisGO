@@ -1,0 +1,162 @@
+services:
+  # --- Core stack (default profile; works without monitoring) ---
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: genesisgo
+      POSTGRES_USER: genesisgo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-genesisgo}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genesisgo -d genesisgo"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "127.0.0.1:4222:4222"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9092:9090"
+    environment:
+      DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LISTEN_ADDR: 0.0.0.0:8080
+      METRICS_LISTEN_ADDR: 0.0.0.0:9090
+      TELEMETRY_ENDPOINT: http://otel-collector:4318
+      LOG_LEVEL: info
+      API_KEYS_ENABLED: "true"
+      RETENTION_PERIOD: 24h
+      MAX_RUNS: "1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    environment:
+      DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  sample-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: sample-consumer
+    environment:
+      DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  # --- Observability profile (opt-in): docker compose --profile observability up -d ---
+  # All published ports below bind to 127.0.0.1 only; nothing is exposed publicly.
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.119.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otel-collector/config.yaml"]
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel-collector/config.yaml:ro
+    ports:
+      - "127.0.0.1:4318:4318"
+    depends_on:
+      api:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=0.0.0.0:9090
+      - --web.enable-lifecycle
+      - --storage.tsdb.path=/prometheus-data
+    ports:
+      - "127.0.0.1:9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus-data
+    depends_on:
+      api:
+        condition: service_started
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    profiles: ["observability"]
+    command: [-config.file=/etc/tempo.yaml]
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/tempo-data
+    ports:
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4317:4317"
+
+  loki:
+    image: grafana/loki:3.1.0
+    profiles: ["observability"]
+    command: [-config.file=/etc/loki/local-config.yml]
+    volumes:
+      - ./config/loki.yaml:/etc/loki/local-config.yml:ro
+      - loki-data:/loki-data
+    ports:
+      - "127.0.0.1:3100:3100"
+
+  grafana:
+    image: grafana/grafana-oss:11.5.0
+    profiles: ["observability"]
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: 3000
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_PATHS_DATA: /grafana-data
+      GF_PATHS_LOGS: /logs
+      GF_PATHS_PLUGINS: /plugins
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/grafana-data
+    depends_on:
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  tempo-data:
+  loki-data:

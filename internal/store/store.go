@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -897,6 +898,157 @@ func ListInvariantResultsByRun(ctx context.Context, q queryer, runID string) ([]
 
 func (s *Store) ListInvariantResultsByRun(ctx context.Context, runID string) ([]*InvariantResult, error) {
 	return ListInvariantResultsByRun(ctx, s.pool, runID)
+}
+
+// ---- audit logs -----------------------------------------------------------
+
+// AuditEntry is an immutable record of a security-relevant action.
+type AuditEntry struct {
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id,omitempty"`
+	Action     string    `json:"action"`
+	ActorKeyID string    `json:"actor_key_id,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// secretKeys are the detail keys whose values are redacted before an audit
+// record is persisted, so audit logs never expose credentials or secrets.
+var secretKeys = []string{
+	"authorization", "api_key", "apikey", "x-api-key",
+	"password", "passwd", "secret", "token", "private_key",
+}
+
+// SanitizeDetail returns a copy of detail with values of secret-like keys
+// replaced by [REDACTED]. It is applied to every audit detail before
+// storage, so audit records cannot expose API keys or sensitive input.
+func SanitizeDetail(detail string) string {
+	for _, key := range secretKeys {
+		detail = redactSecretValue(detail, key)
+	}
+	return detail
+}
+
+func redactSecretValue(detail, key string) string {
+	// Matches key=value or key:"value" (JSON form included), replacing the
+	// value with [REDACTED] while keeping the key. Redaction errs on the side
+	// of removing more rather than leaking a secret.
+	pattern := `(?i)("?` + regexp.QuoteMeta(key) + `"?[ ]*[=:][ ]*)("[^"]*"|[^,\}]*)`
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(detail, `$1[REDACTED]`)
+}
+
+// nullable returns nil for an empty string so optional foreign keys store NULL.
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// RecordAuditLog inserts an audit entry with a redacted detail. The run_id is
+// NULL when no run is involved (for example configuration changes).
+func RecordAuditLog(ctx context.Context, q queryer, runID, action, actorKeyID, detail string) error {
+	const query = `
+		INSERT INTO audit_logs (run_id, action, actor_key_id, detail)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at
+	`
+	row := q.QueryRow(ctx, query, nullable(runID), action, actorKeyID, SanitizeDetail(detail))
+	var id string
+	var createdAt time.Time
+	if err := row.Scan(&id, &createdAt); err != nil {
+		return err
+	}
+	_ = id
+	_ = createdAt
+	return nil
+}
+
+// RecordAuditLog is the Store method form of RecordAuditLog.
+func (s *Store) RecordAuditLog(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	return RecordAuditLog(ctx, s.pool, runID, action, actorKeyID, detail)
+}
+
+// LogAudit is the app.auditLogger form of RecordAuditLog, so *Store can be
+// attached to app.UseCases as the audit logger.
+func (s *Store) LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	return RecordAuditLog(ctx, s.pool, runID, action, actorKeyID, detail)
+}
+
+// CleanupResult summarizes a retention cleanup run.
+type CleanupResult struct {
+	DiagnosticArtifactsPruned int64
+	RunsDeleted               int64
+}
+
+// CleanupOldData enforces retention boundaries:
+//   - diagnostic artifacts older than cutoff are pruned;
+//   - terminal runs older than cutoff beyond maxRuns per scenario are deleted
+//     together with their child records;
+//   - active (non-terminal) runs and the latest run per scenario are never
+//     deleted, so the minimum records needed to explain a current run are
+//     always preserved.
+func (s *Store) CleanupOldData(ctx context.Context, cutoff time.Time, maxRuns int) (CleanupResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CleanupResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var result CleanupResult
+
+	for _, query := range []string{
+		`DELETE FROM diagnosis_reports WHERE created_at < $1`,
+		`DELETE FROM state_snapshots WHERE created_at < $1`,
+	} {
+		tag, err := tx.Exec(ctx, query, cutoff)
+		if err != nil {
+			return CleanupResult{}, err
+		}
+		result.DiagnosticArtifactsPruned += tag.RowsAffected()
+	}
+
+	const deleteOldRuns = `
+		WITH ranked AS (
+			SELECT id, status,
+				ROW_NUMBER() OVER (PARTITION BY scenario_id ORDER BY created_at DESC) AS rn
+			FROM runs
+			WHERE completed_at IS NOT NULL AND completed_at < $1
+		),
+		eligible AS (
+			SELECT id FROM ranked
+			WHERE rn > $2
+			  AND status IN ('completed', 'failed', 'cancelled')
+		)
+		DELETE FROM runs
+		WHERE id IN (SELECT id FROM eligible)
+		RETURNING id
+	`
+	rows, err := tx.Query(ctx, deleteOldRuns, cutoff, maxRuns)
+	if err != nil {
+		return CleanupResult{}, err
+	}
+	deleted := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return CleanupResult{}, err
+		}
+		_ = id
+		deleted++
+	}
+	if err := rows.Err(); err != nil {
+		return CleanupResult{}, err
+	}
+	rows.Close()
+	result.RunsDeleted = int64(deleted)
+
+	if err := tx.Commit(ctx); err != nil {
+		return CleanupResult{}, err
+	}
+	return result, nil
 }
 
 // ---- diagnosis reports --------------------------------------------------

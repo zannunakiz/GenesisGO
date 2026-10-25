@@ -40,6 +40,7 @@ type useCases interface {
 	GetRun(ctx context.Context, id string) (*store.Run, error)
 	CancelRun(ctx context.Context, id string) (*store.Run, error)
 	GetReport(ctx context.Context, runID string) (*report.Report, error)
+	LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error
 }
 
 // Register wires run and scenario endpoints onto mux. Control-plane routes are
@@ -86,9 +87,10 @@ func handleCreateRun(uc useCases) http.HandlerFunc {
 			return
 		}
 
+		idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 		run, created, err := uc.CreateRun(r.Context(), app.CreateRunInput{
 			ScenarioKey:    req.ScenarioKey,
-			IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+			IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
 			switch {
@@ -105,6 +107,11 @@ func handleCreateRun(uc useCases) http.HandlerFunc {
 			status = http.StatusOK
 		}
 		WriteJSON(w, r, status, map[string]any{"run": run})
+
+		actorID := AuthenticatedKeyID(r.Context())
+		uc.LogAudit(r.Context(), run.ID, "run.created", actorID,
+			fmt.Sprintf("scenario_key=%q idempotency_key_provided=%v",
+				req.ScenarioKey, idempotencyKey != ""))
 	}
 }
 
@@ -251,6 +258,10 @@ func handleCancelRun(uc useCases) http.HandlerFunc {
 			return
 		}
 		WriteJSON(w, r, http.StatusOK, map[string]any{"run": run})
+
+		actorID := AuthenticatedKeyID(r.Context())
+		uc.LogAudit(r.Context(), id, "run.canceled", actorID,
+			fmt.Sprintf("status=%s", run.Status))
 	}
 }
 
@@ -278,6 +289,9 @@ func handleGetReport(uc useCases) http.HandlerFunc {
 			Internal(w, r, err)
 			return
 		}
+
+		actorID := AuthenticatedKeyID(r.Context())
+		uc.LogAudit(r.Context(), id, "report.accessed", actorID, "")
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("X-Request-ID", requestIDFor(r))
@@ -312,6 +326,9 @@ func handleExportReport(uc useCases) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		actorID := AuthenticatedKeyID(r.Context())
+		uc.LogAudit(r.Context(), id, "report.exported", actorID, "format=json")
+
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"run-%s-report.json\"", id))
 		w.Header().Set("X-Request-ID", requestIDFor(r))
 		w.WriteHeader(http.StatusOK)
@@ -357,6 +374,9 @@ func handleExportReportCSV(uc useCases) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		actorID := AuthenticatedKeyID(r.Context())
+		uc.LogAudit(r.Context(), id, "report.exported", actorID, "format=csv")
+
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"run-%s-report.csv\"", id))
 		w.Header().Set("X-Request-ID", requestIDFor(r))
 		w.WriteHeader(http.StatusOK)

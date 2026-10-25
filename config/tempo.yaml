@@ -1,0 +1,16 @@
+server:
+  http_server_port: 3200
+  grpc_server_port: 4317
+
+trace:
+  receiver:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tempo-data

@@ -23,22 +23,23 @@ import (
 
 // fakeUseCases implements app use cases with controlled behavior for tests.
 type fakeUseCases struct {
-	scenarios []app.ScenarioSummary
-	scenErr   error
-	createRun *store.Run
-	createErr error
-	created   bool
-	listRuns  []app.RunSummary
-	listTotal int
-	listErr   error
-	getRun    *store.Run
-	getErr    error
-	cancelRun *store.Run
-	cancelErr error
-	cancelID  string
-	report    *report.Report
-	reportErr error
-	reportID  string
+	scenarios    []app.ScenarioSummary
+	scenErr      error
+	createRun    *store.Run
+	createErr    error
+	created      bool
+	listRuns     []app.RunSummary
+	listTotal    int
+	listErr      error
+	getRun       *store.Run
+	getErr       error
+	cancelRun    *store.Run
+	cancelErr    error
+	cancelID     string
+	report       *report.Report
+	reportErr    error
+	reportID     string
+	auditEntries []auditEntry
 }
 
 func (f *fakeUseCases) ListScenarios(ctx context.Context) ([]app.ScenarioSummary, error) {
@@ -65,6 +66,23 @@ func (f *fakeUseCases) CancelRun(ctx context.Context, id string) (*store.Run, er
 func (f *fakeUseCases) GetReport(ctx context.Context, runID string) (*report.Report, error) {
 	f.reportID = runID
 	return f.report, f.reportErr
+}
+
+type auditEntry struct {
+	runID      string
+	action     string
+	actorKeyID string
+	detail     string
+}
+
+func (f *fakeUseCases) LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	f.auditEntries = append(f.auditEntries, auditEntry{
+		runID:      runID,
+		action:     action,
+		actorKeyID: actorKeyID,
+		detail:     detail,
+	})
+	return nil
 }
 
 func newAuthStoreWithKey(t *testing.T, scopes []string) (*auth.MemoryStore, string) {
@@ -139,11 +157,11 @@ func TestListScenariosRequiresAuth(t *testing.T) {
 
 func TestCreateRunSuccess(t *testing.T) {
 	createdRun := &store.Run{
-		ID:          "run-1",
-		ScenarioID:  "duplicate_delivery",
-		Status:      string(store.RunStatePending),
+		ID:           "run-1",
+		ScenarioID:   "duplicate_delivery",
+		Status:       string(store.RunStatePending),
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 	uc := &fakeUseCases{createRun: createdRun, created: true}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
@@ -219,11 +237,11 @@ func TestCreateRunUnknownScenario(t *testing.T) {
 
 func TestCreateRunIdempotency(t *testing.T) {
 	run := &store.Run{
-		ID:          "run-1",
-		ScenarioID:  "duplicate_delivery",
-		Status:      string(store.RunStatePending),
+		ID:           "run-1",
+		ScenarioID:   "duplicate_delivery",
+		Status:       string(store.RunStatePending),
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 	uc := &fakeUseCases{createRun: run, created: true}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
@@ -310,11 +328,11 @@ func TestListRunsRequiresAuth(t *testing.T) {
 func TestGetRunSuccess(t *testing.T) {
 	uc := &fakeUseCases{
 		getRun: &store.Run{
-			ID:          "run-1",
-			ScenarioID:  "scenario-a",
-			Status:      string(store.RunStateCompleted),
+			ID:           "run-1",
+			ScenarioID:   "scenario-a",
+			Status:       string(store.RunStateCompleted),
 			AttemptCount: 3,
-			Version:     1,
+			Version:      1,
 		},
 	}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRead})
@@ -358,12 +376,12 @@ func TestGetRunNotFound(t *testing.T) {
 
 func TestCancelRunSuccess(t *testing.T) {
 	cancelledRun := &store.Run{
-		ID:               "run-1",
-		ScenarioID:       "scenario-a",
-		Status:           string(store.RunStateCancelled),
+		ID:                 "run-1",
+		ScenarioID:         "scenario-a",
+		Status:             string(store.RunStateCancelled),
 		CancellationReason: strPtr("cancelled via API"),
-		AttemptCount:     3,
-		Version:          2,
+		AttemptCount:       3,
+		Version:            2,
 	}
 	uc := &fakeUseCases{cancelRun: cancelledRun}
 	st, secret := newAuthStoreWithKey(t, []string{auth.ScopeRun})
@@ -577,8 +595,8 @@ func TestExportReportCSV(t *testing.T) {
 			Version:      1,
 		},
 		Timestamps: report.Timestamps{
-			CreatedAt:   time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
-			UpdatedAt:   time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+			CreatedAt: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+			UpdatedAt: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
 		},
 		InvariantResults: []report.InvariantResultEntry{
 			{InvariantKey: "no_duplicate_payment", Verdict: string(invariants.StatusPass)},
@@ -620,4 +638,3 @@ func TestExportReportCSV(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
-

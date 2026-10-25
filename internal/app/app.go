@@ -16,10 +16,10 @@ import (
 
 // ScenarioSummary is a safe, minimal view of a built-in scenario.
 type ScenarioSummary struct {
-	Key         string     `json:"key"`
-	Version     int        `json:"version"`
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
+	Key         string `json:"key"`
+	Version     int    `json:"version"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // RunSummary is a safe, minimal view of a run for API responses.
@@ -104,6 +104,13 @@ type UseCases struct {
 	canceler    cancelRunner
 	reportGen   reportGenerator
 	idempotency *idempotencyStore
+	audit       auditLogger
+}
+
+// auditLogger records security-relevant actions. Detail is treated as a
+// redacted summary and must never contain credentials.
+type auditLogger interface {
+	LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error
 }
 
 // NewUseCases builds application use cases from their dependencies.
@@ -116,6 +123,23 @@ func NewUseCases(scenarios scenarioLister, runs runStore, creator runCreator, ca
 		reportGen:   reportGen,
 		idempotency: newIdempotencyStore(),
 	}
+}
+
+// WithAuditLogger attaches an audit logger to the use cases. When nil,
+// auditing is a no-op and audit failures never disrupt business operations.
+func (u *UseCases) WithAuditLogger(logger auditLogger) {
+	u.audit = logger
+}
+
+// logAudit records a security-relevant action. Failures are logged but never
+// returned to callers: auditing is best-effort.
+func (u *UseCases) LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	if u.audit == nil {
+		return nil
+	}
+	// Auditing is best-effort: failures are not propagated to callers so they
+	// never disrupt the business operation.
+	return u.audit.LogAudit(ctx, runID, action, actorKeyID, detail)
 }
 
 // ListScenarios returns all built-in scenarios sorted by key.

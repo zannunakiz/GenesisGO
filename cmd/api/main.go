@@ -62,6 +62,15 @@ func run(ctx context.Context) error {
 		metrics.SetQueueDepthReader(st.CountQueuedRunJobs)
 	}
 
+	// Record the effective, non-secret configuration as an audit event so
+	// startup-time configuration changes are visible in the audit trail.
+	if err := st.RecordAuditLog(ctx, "", "config.loaded", "",
+		fmt.Sprintf("env=%s listen=%s metrics=%s retention=%s max_runs=%d api_keys=%t arcjet=%t",
+			cfg.Environment, cfg.ListenAddress, cfg.MetricsListenAddress,
+			cfg.RetentionPeriod, cfg.MaxRuns, cfg.APIKeysEnabled, cfg.ArcjetEnabled)); err != nil {
+		logger.Warn("record configuration audit log: " + err.Error())
+	}
+
 	loader := scenarios.NewLoader("internal/scenarios/fixtures")
 	if _, err := loader.Load(); err != nil {
 		return fmt.Errorf("load scenarios: %w", err)
@@ -96,6 +105,7 @@ func run(ctx context.Context) error {
 	}
 
 	uc := app.NewUseCases(loader, st, o, o, &reportGen{store: st})
+	uc.WithAuditLogger(st)
 	hub := sse.NewHub(100)
 
 	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
