@@ -37,6 +37,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	logger := observability.NewLogger(os.Stdout, level)
+	telemetry := observability.SetupTelemetry(ctx, "genesisgo-worker", cfg.Environment, cfg.TelemetryEndpoint, os.Stdout, logger)
 
 	pool, err := store.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -44,6 +45,9 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 	st := store.NewStore(pool)
+	if metrics := telemetry.Metrics(); metrics != nil {
+		metrics.SetQueueDepthReader(st.CountQueuedRunJobs)
+	}
 
 	brk, err := broker.New(broker.Config{
 		URL:           cfg.NATSURL,
@@ -54,6 +58,7 @@ func run(ctx context.Context) error {
 		AckWait:       30 * time.Second,
 		MaxAckPending: 1000,
 		Logger:        logger,
+		Metrics:       telemetry.Metrics(),
 	})
 	if err != nil {
 		return fmt.Errorf("create broker: %w", err)
@@ -97,6 +102,7 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.Handle("/metrics", telemetry.MetricsHandler())
 	srv := &http.Server{Addr: "127.0.0.1:8081", Handler: mux}
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Shutdown(context.Background()) }()
@@ -112,5 +118,10 @@ func run(ctx context.Context) error {
 	logger.Info("shutdown signal received")
 
 	o.Stop()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := telemetry.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("telemetry shutdown incomplete")
+	}
 	return nil
 }

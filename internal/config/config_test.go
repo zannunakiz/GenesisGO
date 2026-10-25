@@ -27,6 +27,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Environment != "development" || cfg.ListenAddress != "127.0.0.1:8080" {
 		t.Fatalf("unexpected safe defaults: environment=%q listen=%q", cfg.Environment, cfg.ListenAddress)
 	}
+	if cfg.MetricsListenAddress != "127.0.0.1:9090" {
+		t.Fatalf("unexpected metrics listen default: %q", cfg.MetricsListenAddress)
+	}
 	if cfg.WorkerConcurrency != 4 || cfg.RunTimeout != 2*time.Minute {
 		t.Fatalf("unexpected worker defaults: concurrency=%d timeout=%s", cfg.WorkerConcurrency, cfg.RunTimeout)
 	}
@@ -44,6 +47,13 @@ func TestDefaults(t *testing.T) {
 	}
 	if len(cfg.CORSOrigins) != 1 || cfg.CORSOrigins[0] != "http://localhost:3000" {
 		t.Fatalf("unexpected CORS origins: %v", cfg.CORSOrigins)
+	}
+}
+
+func TestMetricsListenAddressValidation(t *testing.T) {
+	_, err := from(map[string]string{"METRICS_LISTEN_ADDR": "not-an-address"})
+	if err == nil || !strings.Contains(err.Error(), "METRICS_LISTEN_ADDR") {
+		t.Fatalf("expected actionable metrics address error, got %v", err)
 	}
 }
 

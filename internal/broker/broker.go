@@ -21,6 +21,12 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/zannunakiz/GenesisGO/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Defaults for the JetStream stream and durable consumers.
@@ -109,6 +115,8 @@ type Config struct {
 	MaxAckPending int
 	// Logger is optional; slog.Default() is used when nil.
 	Logger *slog.Logger
+	// Metrics records bounded NATS operation metrics when configured.
+	Metrics *observability.Metrics
 }
 
 // Compile-time check.
@@ -121,6 +129,7 @@ type jetStreamBroker struct {
 	stream   string
 	prefix   string
 	log      *slog.Logger
+	metrics  *observability.Metrics
 	mu       sync.Mutex
 	consumes map[string]jetstream.ConsumeContext
 	started  atomic.Bool
@@ -200,6 +209,7 @@ func New(cfg Config) (Broker, error) {
 		stream:   cfg.Stream,
 		prefix:   cfg.SubjectPrefix,
 		log:      cfg.Logger,
+		metrics:  cfg.Metrics,
 		consumes: make(map[string]jetstream.ConsumeContext),
 	}
 
@@ -247,7 +257,21 @@ func (b *jetStreamBroker) ensureStream(ctx context.Context) error {
 
 // Publish writes payload to the run-scoped events subject and waits for the
 // stream persistence acknowledgement.
-func (b *jetStreamBroker) Publish(ctx context.Context, runID string, payload []byte) error {
+func (b *jetStreamBroker) Publish(ctx context.Context, runID string, payload []byte) (resultErr error) {
+	started := time.Now()
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/nats").Start(ctx, "nats.publish",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("messaging.system", "nats"), attribute.String("messaging.operation.name", "publish")),
+	)
+	defer func() {
+		if resultErr != nil {
+			span.SetStatus(codes.Error, "NATS publish failed")
+		}
+		span.End()
+		if b.metrics != nil {
+			b.metrics.NATS(ctx, "publish", time.Since(started), resultErr)
+		}
+	}()
 	if !b.started.Load() || b.closed.Load() {
 		return ErrNotStarted
 	}
@@ -255,7 +279,10 @@ func (b *jetStreamBroker) Publish(ctx context.Context, runID string, payload []b
 	if err != nil {
 		return err
 	}
-	if _, err := b.js.Publish(ctx, subject, payload); err != nil {
+	msg := nats.NewMsg(subject)
+	msg.Data = payload
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(msg.Header))
+	if _, err := b.js.PublishMsg(ctx, msg); err != nil {
 		return fmt.Errorf("publish %q: %w", subject, err)
 	}
 	b.log.Debug("published event",
@@ -269,7 +296,22 @@ func (b *jetStreamBroker) Publish(ctx context.Context, runID string, payload []b
 // Subscribe binds a durable push consumer to the run-scoped events subject
 // and invokes handler for each delivered message. The consumer is created
 // idempotently and uses explicit acknowledgement with a redelivery limit.
-func (b *jetStreamBroker) Subscribe(ctx context.Context, runID string, handler HandlerFunc) error {
+func (b *jetStreamBroker) Subscribe(ctx context.Context, runID string, handler HandlerFunc) (resultErr error) {
+	started := time.Now()
+	messageParent := ctx
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/nats").Start(ctx, "nats.subscribe",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("messaging.system", "nats"), attribute.String("messaging.operation.name", "subscribe")),
+	)
+	defer func() {
+		if resultErr != nil {
+			span.SetStatus(codes.Error, "NATS subscribe failed")
+		}
+		span.End()
+		if b.metrics != nil {
+			b.metrics.NATS(messageParent, "subscribe", time.Since(started), resultErr)
+		}
+	}()
 	if !b.started.Load() || b.closed.Load() {
 		return ErrNotStarted
 	}
@@ -297,7 +339,23 @@ func (b *jetStreamBroker) Subscribe(ctx context.Context, runID string, handler H
 	}
 
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		b.handleMessage(ctx, msg, handler)
+		messageCtx := otel.GetTextMapPropagator().Extract(messageParent, propagation.HeaderCarrier(msg.Headers()))
+		b.handleMessage(messageCtx, msg, func(ctx context.Context, subject string, payload []byte, ack Ack) error {
+			started := time.Now()
+			ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/nats").Start(ctx, "nats.consume",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(attribute.String("messaging.system", "nats"), attribute.String("messaging.operation.name", "consume")),
+			)
+			err := handler(ctx, subject, payload, ack)
+			if err != nil {
+				span.SetStatus(codes.Error, "NATS message handler failed")
+			}
+			span.End()
+			if b.metrics != nil {
+				b.metrics.NATS(ctx, "consume", time.Since(started), err)
+			}
+			return err
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("consume %q: %w", subject, err)
@@ -319,7 +377,21 @@ func (b *jetStreamBroker) Subscribe(ctx context.Context, runID string, handler H
 // redeliveries occur for that run. It is idempotent: deleting a consumer that
 // does not exist is not an error. The stream and its messages are retained so
 // evidence remains available for reporting.
-func (b *jetStreamBroker) DeleteConsumer(ctx context.Context, runID string) error {
+func (b *jetStreamBroker) DeleteConsumer(ctx context.Context, runID string) (resultErr error) {
+	started := time.Now()
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/nats").Start(ctx, "nats.delete_consumer",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("messaging.system", "nats"), attribute.String("messaging.operation.name", "delete_consumer")),
+	)
+	defer func() {
+		if resultErr != nil {
+			span.SetStatus(codes.Error, "NATS consumer cleanup failed")
+		}
+		span.End()
+		if b.metrics != nil {
+			b.metrics.NATS(ctx, "delete_consumer", time.Since(started), resultErr)
+		}
+	}()
 	if !b.started.Load() || b.closed.Load() {
 		return ErrNotStarted
 	}

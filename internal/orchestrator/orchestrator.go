@@ -26,9 +26,13 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/broker"
 	"github.com/zannunakiz/GenesisGO/internal/events"
 	"github.com/zannunakiz/GenesisGO/internal/invariants"
+	"github.com/zannunakiz/GenesisGO/internal/observability"
 	"github.com/zannunakiz/GenesisGO/internal/sampleconsumer"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
 	"github.com/zannunakiz/GenesisGO/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Sentinel errors returned by the orchestrator.
@@ -49,7 +53,8 @@ var (
 // jobPayload is the JSON payload stored on a run job. It identifies which
 // scenario the job executes.
 type jobPayload struct {
-	ScenarioKey string `json:"scenario_key"`
+	ScenarioKey  string            `json:"scenario_key"`
+	TraceContext map[string]string `json:"trace_context,omitempty"`
 }
 
 // RunStore is the subset of store.Store the orchestrator depends on. Keeping
@@ -122,15 +127,15 @@ type Config struct {
 
 // Orchestrator schedules and executes run jobs. It is safe for concurrent use.
 type Orchestrator struct {
-	cfg          Config
-	log          *slog.Logger
-	owner        string // unique owner prefix for leases claimed by StartWorkers
+	cfg   Config
+	log   *slog.Logger
+	owner string // unique owner prefix for leases claimed by StartWorkers
 
-	mu          sync.Mutex
-	executing   map[string]*atomic.Bool      // runID -> job in progress (defense in depth)
+	mu            sync.Mutex
+	executing     map[string]*atomic.Bool       // runID -> job in progress (defense in depth)
 	cancelSignals map[string]context.CancelFunc // runID -> cancel func for in-flight execution
-	workers     sync.WaitGroup
-	stop        atomic.Bool
+	workers       sync.WaitGroup
+	stop          atomic.Bool
 }
 
 // pgxErrNoRows is aliased so the package can distinguish a missing row from
@@ -183,9 +188,9 @@ func New(cfg Config) (*Orchestrator, error) {
 			MaxEventsPerRun:   maxEvents,
 			Logger:            log,
 		},
-		log:       log,
-		owner:     fmt.Sprintf("orchestrator-%d", time.Now().UnixNano()),
-		executing: make(map[string]*atomic.Bool),
+		log:           log,
+		owner:         fmt.Sprintf("orchestrator-%d", time.Now().UnixNano()),
+		executing:     make(map[string]*atomic.Bool),
 		cancelSignals: make(map[string]context.CancelFunc),
 	}, nil
 }
@@ -195,6 +200,8 @@ func New(cfg Config) (*Orchestrator, error) {
 // returns the created run. The run is not executed until a worker claims its
 // job via StartWorkers or ExecuteRun.
 func (o *Orchestrator) EnqueueScenario(ctx context.Context, scenarioKey string) (*store.Run, error) {
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/orchestrator").Start(ctx, "run.enqueue")
+	defer span.End()
 	fixtures, err := o.cfg.ScenarioLoader.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load scenarios: %w", err)
@@ -223,7 +230,10 @@ func (o *Orchestrator) EnqueueScenario(ctx context.Context, scenarioKey string) 
 		if err != nil {
 			return fmt.Errorf("create run: %w", err)
 		}
-		payload, err := json.Marshal(jobPayload{ScenarioKey: scenarioKey})
+		payload, err := json.Marshal(jobPayload{
+			ScenarioKey:  scenarioKey,
+			TraceContext: observability.InjectTraceContext(ctx),
+		})
 		if err != nil {
 			return fmt.Errorf("marshal job payload: %w", err)
 		}
@@ -314,6 +324,10 @@ func (o *Orchestrator) workerLoop(ctx context.Context, owner string) {
 		}
 		job, err := o.cfg.Store.ClaimRunJob(ctx, owner, ttlSeconds)
 		if err != nil {
+			if metrics := observability.MetricsForProcess(); metrics != nil &&
+				!errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				metrics.WorkerJob("error")
+			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
@@ -331,10 +345,19 @@ func (o *Orchestrator) workerLoop(ctx context.Context, owner string) {
 			_ = o.cfg.Store.UpdateRunJobStatus(ctx, job.ID, "open")
 			return
 		}
+		jobCtx := traceContextForJob(ctx, job.Payload)
+		jobCtx, jobSpan := otel.Tracer("github.com/zannunakiz/GenesisGO/orchestrator").Start(
+			jobCtx, "worker.run_job", trace.WithSpanKind(trace.SpanKindConsumer),
+		)
+		if metrics := observability.MetricsForProcess(); metrics != nil {
+			metrics.WorkerJob("claimed")
+		}
 
-		run, err := o.cfg.Store.GetRun(ctx, job.RunID)
+		run, err := o.cfg.Store.GetRun(jobCtx, job.RunID)
 		if err != nil {
-			o.failJob(ctx, job.ID, fmt.Sprintf("load run: %v", err))
+			o.failJob(jobCtx, job.ID, fmt.Sprintf("load run: %v", err))
+			jobSpan.SetStatus(codes.Error, "load run failed")
+			jobSpan.End()
 			continue
 		}
 
@@ -344,9 +367,13 @@ func (o *Orchestrator) workerLoop(ctx context.Context, owner string) {
 		o.workers.Add(1)
 		go o.heartbeatLoop(hctx, job.ID, owner, ttlSeconds)
 
-		o.executeJob(ctx, run)
+		_, executionErr := o.executeJob(jobCtx, run)
 
 		hcancel()
+		if executionErr != nil {
+			jobSpan.SetStatus(codes.Error, "run execution failed")
+		}
+		jobSpan.End()
 	}
 }
 
@@ -380,7 +407,26 @@ func (o *Orchestrator) heartbeatLoop(ctx context.Context, jobID, owner string, t
 // invariant passed; otherwise it persists failed. Terminal transitions use
 // optimistic locking, so a run can never be completed twice or leave a
 // terminal state (no fake pass).
-func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (*store.Run, error) {
+func (o *Orchestrator) executeJob(ctx context.Context, run *store.Run) (result *store.Run, resultErr error) {
+	started := time.Now()
+	metrics := observability.MetricsForProcess()
+	if metrics != nil {
+		metrics.RunStarted(ctx)
+	}
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/orchestrator").Start(ctx, "run.execute")
+	defer func() {
+		status := "error"
+		if result != nil {
+			status = result.Status
+		}
+		if resultErr != nil {
+			span.SetStatus(codes.Error, "run execution failed")
+		}
+		span.End()
+		if metrics != nil {
+			metrics.RunFinished(ctx, status, time.Since(started))
+		}
+	}()
 	scenarioKey, err := o.scenarioKeyFromRun(ctx, run)
 	if err != nil {
 		return o.failRun(ctx, run.ID, run.Version, fmt.Errorf("resolve scenario: %w", err))
@@ -617,12 +663,12 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 		return noopExecutor{}
 	}
 	return &defaultExecutor{
-		broker:           o.cfg.Broker,
-		store:            o.cfg.Store,
-		sample:           o.cfg.SampleConsumer,
-		log:              o.log,
-		maxEventsPerRun:  o.cfg.MaxEventsPerRun,
-		published:        make(map[string][]byte),
+		broker:          o.cfg.Broker,
+		store:           o.cfg.Store,
+		sample:          o.cfg.SampleConsumer,
+		log:             o.log,
+		maxEventsPerRun: o.cfg.MaxEventsPerRun,
+		published:       make(map[string][]byte),
 	}
 }
 
@@ -631,8 +677,11 @@ func (o *Orchestrator) executorFor(_ string) ScenarioExecutor {
 // result per declared rule. Rules not declared by the scenario are recorded
 // as not_evaluated so every rule has a deterministic verdict for the run.
 func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scenario *scenarios.Scenario) error {
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/invariants").Start(ctx, "invariants.evaluate")
+	defer span.End()
 	effects, err := o.cfg.Store.ListSideEffectRecordsByRun(ctx, runID)
 	if err != nil {
+		span.SetStatus(codes.Error, "load invariant evidence failed")
 		return err
 	}
 	ev := make([]invariants.EffectRecord, 0, len(effects))
@@ -660,6 +709,9 @@ func (o *Orchestrator) evaluateAndRecord(ctx context.Context, runID string, scen
 
 	results := o.cfg.Invariants.EvaluateAll(ctx, invariants.Evidence{RunID: runID, Effects: ev})
 	for _, r := range results {
+		if metrics := observability.MetricsForProcess(); metrics != nil {
+			metrics.Invariant(ctx, string(r.Status))
+		}
 		scenarioKey, ok := ruleToScenarioKey[r.InvariantKey]
 		if !ok {
 			// Rule not declared by this scenario: record as not_evaluated
@@ -709,6 +761,9 @@ func (o *Orchestrator) recordNotEvaluatedResult(ctx context.Context, runID, inva
 	if merr != nil {
 		return merr
 	}
+	if metrics := observability.MetricsForProcess(); metrics != nil {
+		metrics.Invariant(ctx, string(invariants.StatusNotEvaluated))
+	}
 	_, err := o.cfg.Store.CreateInvariantResult(ctx, runID, invariantKey, string(invariants.StatusNotEvaluated), details)
 	return err
 }
@@ -747,15 +802,15 @@ func (noopExecutor) Execute(context.Context, string, *scenarios.Scenario) error 
 // out-of-order delivery reproducible from the scenario plan instead of
 // transport timing.
 type defaultExecutor struct {
-	broker            broker.Broker
-	store             RunStore
-	sample            *sampleconsumer.Consumer
-	log               *slog.Logger
-	mu                sync.Mutex
-	fault             *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
-	published         map[string][]byte     // event_id -> payload staged by publish steps
-	maxEventsPerRun   int                   // cap on total events published for this run
-	publishedCount    int                   // running count of publish steps executed this run
+	broker          broker.Broker
+	store           RunStore
+	sample          *sampleconsumer.Consumer
+	log             *slog.Logger
+	mu              sync.Mutex
+	fault           *sampleconsumer.Fault // one-shot fault applied to the next matching delivery
+	published       map[string][]byte     // event_id -> payload staged by publish steps
+	maxEventsPerRun int                   // cap on total events published for this run
+	publishedCount  int                   // running count of publish steps executed this run
 }
 
 // Execute runs every step of scenario for runID.
@@ -972,6 +1027,11 @@ func (e *defaultExecutor) recordAttempt(
 	if attempt <= 0 {
 		attempt = 1
 	}
+	if attempt > 1 {
+		if metrics := observability.MetricsForProcess(); metrics != nil {
+			metrics.Retry(ctx)
+		}
+	}
 	var fault *string
 	if faultInjected != "" {
 		fault = &faultInjected
@@ -980,6 +1040,14 @@ func (e *defaultExecutor) recordAttempt(
 		return fmt.Errorf("record attempt: %w", err)
 	}
 	return nil
+}
+
+func traceContextForJob(ctx context.Context, payload []byte) context.Context {
+	var job jobPayload
+	if err := json.Unmarshal(payload, &job); err != nil {
+		return ctx
+	}
+	return observability.ExtractTraceContext(ctx, job.TraceContext)
 }
 
 // eventTypeFromPayload maps the synthetic business payload type to the
@@ -1024,13 +1092,13 @@ func (e *defaultExecutor) captureSnapshot(
 	for _, eff := range effects {
 		if eff.AggregateID == aggregateID {
 			matching = append(matching, map[string]any{
-				"id":             eff.ID,
-				"effect_type":    eff.EffectType,
-				"aggregate_id":   eff.AggregateID,
+				"id":              eff.ID,
+				"effect_type":     eff.EffectType,
+				"aggregate_id":    eff.AggregateID,
 				"idempotency_key": eff.IdempotencyKey,
-				"amount_cents":   eff.AmountCents,
-				"currency":       eff.Currency,
-				"recorded_at":    eff.RecordedAt,
+				"amount_cents":    eff.AmountCents,
+				"currency":        eff.Currency,
+				"recorded_at":     eff.RecordedAt,
 			})
 		}
 	}

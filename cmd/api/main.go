@@ -20,9 +20,9 @@ import (
 	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
 	"github.com/zannunakiz/GenesisGO/internal/protection"
 	"github.com/zannunakiz/GenesisGO/internal/report"
-	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/sampleconsumer"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
+	"github.com/zannunakiz/GenesisGO/internal/sse"
 	"github.com/zannunakiz/GenesisGO/internal/store"
 )
 
@@ -44,6 +44,7 @@ func run(ctx context.Context) error {
 	}
 	logger := observability.NewLogger(os.Stdout, level)
 	startTime := time.Now()
+	telemetry := observability.SetupTelemetry(ctx, "genesisgo-api", cfg.Environment, cfg.TelemetryEndpoint, os.Stdout, logger)
 
 	authStore, err := loadAuthStore(cfg)
 	if err != nil {
@@ -57,6 +58,9 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 	st := store.NewStore(pool)
+	if metrics := telemetry.Metrics(); metrics != nil {
+		metrics.SetQueueDepthReader(st.CountQueuedRunJobs)
+	}
 
 	loader := scenarios.NewLoader("internal/scenarios/fixtures")
 	if _, err := loader.Load(); err != nil {
@@ -119,8 +123,19 @@ func run(ctx context.Context) error {
 	handler = httpapi.RequestLogger(logger)(handler)
 	handler = httpapi.Recover(handler)
 	handler = httpapi.Timeout(httpapi.DefaultTimeouts().HandlerTimeoutOrDefault())(handler)
+	handler = telemetry.HTTPMiddleware(handler)
 
 	srv := httpapi.WithTimeouts(&http.Server{Addr: cfg.ListenAddress, Handler: handler}, httpapi.DefaultTimeouts())
+	metricsSrv := &http.Server{
+		Addr:              cfg.MetricsListenAddress,
+		Handler:           telemetry.MetricsHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Warn("metrics endpoint unavailable; API remains available")
+		}
+	}()
 
 	startErr := make(chan error, 1)
 	go func() {
@@ -151,9 +166,10 @@ func run(ctx context.Context) error {
 		func(context.Context) {},
 		[]observability.Closer{
 			{Name: "http_server", Close: func(shutdown context.Context) error { return srv.Shutdown(shutdown) }},
+			{Name: "metrics_server", Close: func(shutdown context.Context) error { return metricsSrv.Shutdown(shutdown) }},
 			{Name: "database", Close: func(context.Context) error { return nil }},
 			{Name: "nats", Close: func(context.Context) error { return nil }},
-			{Name: "telemetry", Close: func(context.Context) error { return nil }},
+			{Name: "telemetry", Close: telemetry.Shutdown},
 		},
 	)
 }
