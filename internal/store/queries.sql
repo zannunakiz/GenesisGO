@@ -85,10 +85,10 @@ ORDER BY received_at ASC;
 -- name: CreateRunJob :one
 INSERT INTO run_jobs (run_id, job_type, status, payload)
 VALUES ($1, $2, $3, $4)
-RETURNING id, run_id, job_type, status, payload, created_at, updated_at;
+RETURNING id, run_id, job_type, status, payload, created_at, updated_at, leased_at, lease_owner, lease_expires_at;
 
 -- name: ListRunJobsByRun :many
-SELECT id, run_id, job_type, status, payload, created_at, updated_at
+SELECT id, run_id, job_type, status, payload, created_at, updated_at, leased_at, lease_owner, lease_expires_at
 FROM run_jobs
 WHERE run_id = $1
 ORDER BY created_at ASC;

@@ -37,17 +37,17 @@ type Scenario struct {
 
 // Run is a single execution of a scenario.
 type Run struct {
-	ID             string     `json:"id"`
-	ScenarioID     string     `json:"scenario_id"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	FailureReason  *string    `json:"failure_reason,omitempty"`
-	CancellationReason *string `json:"cancellation_reason,omitempty"`
-	AttemptCount   int32      `json:"attempt_count"`
-	Version        int32      `json:"version"`
+	ID                 string     `json:"id"`
+	ScenarioID         string     `json:"scenario_id"`
+	Status             string     `json:"status"`
+	CreatedAt          time.Time  `json:"created_at"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	FailureReason      *string    `json:"failure_reason,omitempty"`
+	CancellationReason *string    `json:"cancellation_reason,omitempty"`
+	AttemptCount       int32      `json:"attempt_count"`
+	Version            int32      `json:"version"`
 }
 
 // RunJob is a bounded unit of work scheduled by the orchestrator for a run.
@@ -68,26 +68,26 @@ type RunJob struct {
 
 // EventAttempt is a single delivery attempt of an event to the consumer.
 type EventAttempt struct {
-	ID              string     `json:"id"`
-	RunID           string     `json:"run_id"`
-	EventID         string     `json:"event_id"`
-	AttemptNumber   int32      `json:"attempt_number"`
-	DeliveredAt     time.Time  `json:"delivered_at"`
-	AcknowledgedAt  *time.Time `json:"acknowledged_at,omitempty"`
-	FaultInjected   *string    `json:"fault_injected,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID             string     `json:"id"`
+	RunID          string     `json:"run_id"`
+	EventID        string     `json:"event_id"`
+	AttemptNumber  int32      `json:"attempt_number"`
+	DeliveredAt    time.Time  `json:"delivered_at"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	FaultInjected  *string    `json:"fault_injected,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // SideEffectRecord is a business effect written by the consumer.
 type SideEffectRecord struct {
-	ID             string     `json:"id"`
-	RunID          string     `json:"run_id"`
-	EffectType     string     `json:"effect_type"`
-	AggregateID    string     `json:"aggregate_id"`
-	IdempotencyKey *string    `json:"idempotency_key,omitempty"`
-	AmountCents    *int64     `json:"amount_cents,omitempty"`
-	Currency       string     `json:"currency"`
-	RecordedAt     time.Time  `json:"recorded_at"`
+	ID             string    `json:"id"`
+	RunID          string    `json:"run_id"`
+	EffectType     string    `json:"effect_type"`
+	AggregateID    string    `json:"aggregate_id"`
+	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
+	AmountCents    *int64    `json:"amount_cents,omitempty"`
+	Currency       string    `json:"currency"`
+	RecordedAt     time.Time `json:"recorded_at"`
 }
 
 // InvariantResult is a deterministic business invariant verdict for a run.
@@ -102,26 +102,26 @@ type InvariantResult struct {
 
 // DiagnosisReport is an optional AI-assisted diagnosis report (one per run).
 type DiagnosisReport struct {
-	ID         string     `json:"id"`
-	RunID      string     `json:"run_id"`
-	Summary    *string    `json:"summary,omitempty"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	Summary     *string   `json:"summary,omitempty"`
 	Suggestions []byte    `json:"suggestions,omitempty"`
-	Model      *string    `json:"model,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	Model       *string   `json:"model,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // StateSnapshot captures a safe before/after state summary for a single
 // event delivery within a run. Only non-sensitive summary data is stored;
 // full raw payloads are intentionally omitted.
 type StateSnapshot struct {
-	ID           string     `json:"id"`
-	RunID        string     `json:"run_id"`
-	StepID       string     `json:"step_id"`
-	EventID      string     `json:"event_id"`
-	SnapshotType string     `json:"snapshot_type"` // "before" or "after"
-	AggregateID  string     `json:"aggregate_id"`
-	StateSummary []byte     `json:"state_summary,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           string    `json:"id"`
+	RunID        string    `json:"run_id"`
+	StepID       string    `json:"step_id"`
+	EventID      string    `json:"event_id"`
+	SnapshotType string    `json:"snapshot_type"` // "before" or "after"
+	AggregateID  string    `json:"aggregate_id"`
+	StateSummary []byte    `json:"state_summary,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Scan helpers map pgx rows onto models. NULLable columns scan into nil
@@ -153,8 +153,7 @@ func scanRunJob(row pgx.Row) (*RunJob, error) {
 	var j RunJob
 	if err := row.Scan(
 		&j.ID, &j.RunID, &j.JobType, &j.Status, &j.Payload,
-		&j.LeasedAt, &j.LeaseOwner, &j.LeaseExpiresAt,
-		&j.CreatedAt, &j.UpdatedAt,
+		&j.CreatedAt, &j.UpdatedAt, &j.LeasedAt, &j.LeaseOwner, &j.LeaseExpiresAt,
 	); err != nil {
 		return nil, err
 	}
@@ -401,7 +400,8 @@ func CreateRunJob(ctx context.Context, q queryer, runID, jobType, status string,
 	const query = `
 		INSERT INTO run_jobs (run_id, job_type, status, payload)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, run_id, job_type, status, payload, created_at, updated_at
+		RETURNING id, run_id, job_type, status, payload, created_at, updated_at,
+			leased_at, lease_owner, lease_expires_at
 	`
 	row := q.QueryRow(ctx, query, runID, jobType, status, payload)
 	return scanRunJob(row)
@@ -414,7 +414,8 @@ func (s *Store) CreateRunJob(ctx context.Context, runID, jobType, status string,
 // ListRunJobsByRun returns run jobs for a run, oldest first.
 func ListRunJobsByRun(ctx context.Context, q queryer, runID string) ([]*RunJob, error) {
 	const query = `
-		SELECT id, run_id, job_type, status, payload, created_at, updated_at
+		SELECT id, run_id, job_type, status, payload, created_at, updated_at,
+			leased_at, lease_owner, lease_expires_at
 		FROM run_jobs
 		WHERE run_id = $1
 		ORDER BY created_at ASC
@@ -540,6 +541,7 @@ func RecoverExpiredLeases(ctx context.Context, q queryer) (int64, error) {
 func (s *Store) RecoverExpiredLeases(ctx context.Context) (int64, error) {
 	return RecoverExpiredLeases(ctx, s.pool)
 }
+
 // ---- event attempts -----------------------------------------------------
 
 // CreateEventAttempt records a single delivery attempt.
