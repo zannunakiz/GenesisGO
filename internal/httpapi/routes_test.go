@@ -32,6 +32,7 @@ type fakeUseCases struct {
 	listTotal    int
 	listErr      error
 	getRun       *store.Run
+	getRunID     string
 	getErr       error
 	cancelRun    *store.Run
 	cancelErr    error
@@ -55,6 +56,7 @@ func (f *fakeUseCases) ListRuns(ctx context.Context, in app.ListRunsInput) ([]ap
 }
 
 func (f *fakeUseCases) GetRun(ctx context.Context, id string) (*store.Run, error) {
+	f.getRunID = id
 	return f.getRun, f.getErr
 }
 
