@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,17 +38,17 @@ type Scenario struct {
 
 // Run is a single execution of a scenario.
 type Run struct {
-	ID             string     `json:"id"`
-	ScenarioID     string     `json:"scenario_id"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	FailureReason  *string    `json:"failure_reason,omitempty"`
-	CancellationReason *string `json:"cancellation_reason,omitempty"`
-	AttemptCount   int32      `json:"attempt_count"`
-	Version        int32      `json:"version"`
+	ID                 string     `json:"id"`
+	ScenarioID         string     `json:"scenario_id"`
+	Status             string     `json:"status"`
+	CreatedAt          time.Time  `json:"created_at"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	FailureReason      *string    `json:"failure_reason,omitempty"`
+	CancellationReason *string    `json:"cancellation_reason,omitempty"`
+	AttemptCount       int32      `json:"attempt_count"`
+	Version            int32      `json:"version"`
 }
 
 // RunJob is a bounded unit of work scheduled by the orchestrator for a run.
@@ -68,26 +69,26 @@ type RunJob struct {
 
 // EventAttempt is a single delivery attempt of an event to the consumer.
 type EventAttempt struct {
-	ID              string     `json:"id"`
-	RunID           string     `json:"run_id"`
-	EventID         string     `json:"event_id"`
-	AttemptNumber   int32      `json:"attempt_number"`
-	DeliveredAt     time.Time  `json:"delivered_at"`
-	AcknowledgedAt  *time.Time `json:"acknowledged_at,omitempty"`
-	FaultInjected   *string    `json:"fault_injected,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID             string     `json:"id"`
+	RunID          string     `json:"run_id"`
+	EventID        string     `json:"event_id"`
+	AttemptNumber  int32      `json:"attempt_number"`
+	DeliveredAt    time.Time  `json:"delivered_at"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	FaultInjected  *string    `json:"fault_injected,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // SideEffectRecord is a business effect written by the consumer.
 type SideEffectRecord struct {
-	ID             string     `json:"id"`
-	RunID          string     `json:"run_id"`
-	EffectType     string     `json:"effect_type"`
-	AggregateID    string     `json:"aggregate_id"`
-	IdempotencyKey *string    `json:"idempotency_key,omitempty"`
-	AmountCents    *int64     `json:"amount_cents,omitempty"`
-	Currency       string     `json:"currency"`
-	RecordedAt     time.Time  `json:"recorded_at"`
+	ID             string    `json:"id"`
+	RunID          string    `json:"run_id"`
+	EffectType     string    `json:"effect_type"`
+	AggregateID    string    `json:"aggregate_id"`
+	IdempotencyKey *string   `json:"idempotency_key,omitempty"`
+	AmountCents    *int64    `json:"amount_cents,omitempty"`
+	Currency       string    `json:"currency"`
+	RecordedAt     time.Time `json:"recorded_at"`
 }
 
 // InvariantResult is a deterministic business invariant verdict for a run.
@@ -102,26 +103,26 @@ type InvariantResult struct {
 
 // DiagnosisReport is an optional AI-assisted diagnosis report (one per run).
 type DiagnosisReport struct {
-	ID         string     `json:"id"`
-	RunID      string     `json:"run_id"`
-	Summary    *string    `json:"summary,omitempty"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	Summary     *string   `json:"summary,omitempty"`
 	Suggestions []byte    `json:"suggestions,omitempty"`
-	Model      *string    `json:"model,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	Model       *string   `json:"model,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // StateSnapshot captures a safe before/after state summary for a single
 // event delivery within a run. Only non-sensitive summary data is stored;
 // full raw payloads are intentionally omitted.
 type StateSnapshot struct {
-	ID           string     `json:"id"`
-	RunID        string     `json:"run_id"`
-	StepID       string     `json:"step_id"`
-	EventID      string     `json:"event_id"`
-	SnapshotType string     `json:"snapshot_type"` // "before" or "after"
-	AggregateID  string     `json:"aggregate_id"`
-	StateSummary []byte     `json:"state_summary,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           string    `json:"id"`
+	RunID        string    `json:"run_id"`
+	StepID       string    `json:"step_id"`
+	EventID      string    `json:"event_id"`
+	SnapshotType string    `json:"snapshot_type"` // "before" or "after"
+	AggregateID  string    `json:"aggregate_id"`
+	StateSummary []byte    `json:"state_summary,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Scan helpers map pgx rows onto models. NULLable columns scan into nil
@@ -153,8 +154,7 @@ func scanRunJob(row pgx.Row) (*RunJob, error) {
 	var j RunJob
 	if err := row.Scan(
 		&j.ID, &j.RunID, &j.JobType, &j.Status, &j.Payload,
-		&j.LeasedAt, &j.LeaseOwner, &j.LeaseExpiresAt,
-		&j.CreatedAt, &j.UpdatedAt,
+		&j.CreatedAt, &j.UpdatedAt, &j.LeasedAt, &j.LeaseOwner, &j.LeaseExpiresAt,
 	); err != nil {
 		return nil, err
 	}
@@ -361,6 +361,39 @@ func (s *Store) ListRunsByScenario(ctx context.Context, scenarioID string) ([]*R
 	return ListRunsByScenario(ctx, s.pool, scenarioID)
 }
 
+// ListRuns returns all runs, newest first.
+func ListRuns(ctx context.Context, q queryer) ([]*Run, error) {
+	const query = `
+		SELECT id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
+		FROM runs
+		ORDER BY created_at DESC
+	`
+	rows, err := q.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []*Run{}
+	}
+	return out, nil
+}
+
+func (s *Store) ListRuns(ctx context.Context) ([]*Run, error) {
+	return ListRuns(ctx, s.pool)
+}
+
 // ---- run jobs -----------------------------------------------------------
 
 // CreateRunJob inserts a bounded unit of work for a run.
@@ -368,7 +401,8 @@ func CreateRunJob(ctx context.Context, q queryer, runID, jobType, status string,
 	const query = `
 		INSERT INTO run_jobs (run_id, job_type, status, payload)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, run_id, job_type, status, payload, created_at, updated_at
+		RETURNING id, run_id, job_type, status, payload, created_at, updated_at,
+			leased_at, lease_owner, lease_expires_at
 	`
 	row := q.QueryRow(ctx, query, runID, jobType, status, payload)
 	return scanRunJob(row)
@@ -381,7 +415,8 @@ func (s *Store) CreateRunJob(ctx context.Context, runID, jobType, status string,
 // ListRunJobsByRun returns run jobs for a run, oldest first.
 func ListRunJobsByRun(ctx context.Context, q queryer, runID string) ([]*RunJob, error) {
 	const query = `
-		SELECT id, run_id, job_type, status, payload, created_at, updated_at
+		SELECT id, run_id, job_type, status, payload, created_at, updated_at,
+			leased_at, lease_owner, lease_expires_at
 		FROM run_jobs
 		WHERE run_id = $1
 		ORDER BY created_at ASC
@@ -507,6 +542,7 @@ func RecoverExpiredLeases(ctx context.Context, q queryer) (int64, error) {
 func (s *Store) RecoverExpiredLeases(ctx context.Context) (int64, error) {
 	return RecoverExpiredLeases(ctx, s.pool)
 }
+
 // ---- event attempts -----------------------------------------------------
 
 // CreateEventAttempt records a single delivery attempt.
@@ -862,6 +898,157 @@ func ListInvariantResultsByRun(ctx context.Context, q queryer, runID string) ([]
 
 func (s *Store) ListInvariantResultsByRun(ctx context.Context, runID string) ([]*InvariantResult, error) {
 	return ListInvariantResultsByRun(ctx, s.pool, runID)
+}
+
+// ---- audit logs -----------------------------------------------------------
+
+// AuditEntry is an immutable record of a security-relevant action.
+type AuditEntry struct {
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id,omitempty"`
+	Action     string    `json:"action"`
+	ActorKeyID string    `json:"actor_key_id,omitempty"`
+	Detail     string    `json:"detail,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// secretKeys are the detail keys whose values are redacted before an audit
+// record is persisted, so audit logs never expose credentials or secrets.
+var secretKeys = []string{
+	"authorization", "api_key", "apikey", "x-api-key",
+	"password", "passwd", "secret", "token", "private_key",
+}
+
+// SanitizeDetail returns a copy of detail with values of secret-like keys
+// replaced by [REDACTED]. It is applied to every audit detail before
+// storage, so audit records cannot expose API keys or sensitive input.
+func SanitizeDetail(detail string) string {
+	for _, key := range secretKeys {
+		detail = redactSecretValue(detail, key)
+	}
+	return detail
+}
+
+func redactSecretValue(detail, key string) string {
+	// Matches key=value or key:"value" (JSON form included), replacing the
+	// value with [REDACTED] while keeping the key. Redaction errs on the side
+	// of removing more rather than leaking a secret.
+	pattern := `(?i)("?` + regexp.QuoteMeta(key) + `"?[ ]*[=:][ ]*)("[^"]*"|[^,\}]*)`
+	re := regexp.MustCompile(pattern)
+	return re.ReplaceAllString(detail, `$1[REDACTED]`)
+}
+
+// nullable returns nil for an empty string so optional foreign keys store NULL.
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// RecordAuditLog inserts an audit entry with a redacted detail. The run_id is
+// NULL when no run is involved (for example configuration changes).
+func RecordAuditLog(ctx context.Context, q queryer, runID, action, actorKeyID, detail string) error {
+	const query = `
+		INSERT INTO audit_logs (run_id, action, actor_key_id, detail)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, created_at
+	`
+	row := q.QueryRow(ctx, query, nullable(runID), action, actorKeyID, SanitizeDetail(detail))
+	var id string
+	var createdAt time.Time
+	if err := row.Scan(&id, &createdAt); err != nil {
+		return err
+	}
+	_ = id
+	_ = createdAt
+	return nil
+}
+
+// RecordAuditLog is the Store method form of RecordAuditLog.
+func (s *Store) RecordAuditLog(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	return RecordAuditLog(ctx, s.pool, runID, action, actorKeyID, detail)
+}
+
+// LogAudit is the app.auditLogger form of RecordAuditLog, so *Store can be
+// attached to app.UseCases as the audit logger.
+func (s *Store) LogAudit(ctx context.Context, runID, action, actorKeyID, detail string) error {
+	return RecordAuditLog(ctx, s.pool, runID, action, actorKeyID, detail)
+}
+
+// CleanupResult summarizes a retention cleanup run.
+type CleanupResult struct {
+	DiagnosticArtifactsPruned int64
+	RunsDeleted               int64
+}
+
+// CleanupOldData enforces retention boundaries:
+//   - diagnostic artifacts older than cutoff are pruned;
+//   - terminal runs older than cutoff beyond maxRuns per scenario are deleted
+//     together with their child records;
+//   - active (non-terminal) runs and the latest run per scenario are never
+//     deleted, so the minimum records needed to explain a current run are
+//     always preserved.
+func (s *Store) CleanupOldData(ctx context.Context, cutoff time.Time, maxRuns int) (CleanupResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CleanupResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var result CleanupResult
+
+	for _, query := range []string{
+		`DELETE FROM diagnosis_reports WHERE created_at < $1`,
+		`DELETE FROM state_snapshots WHERE created_at < $1`,
+	} {
+		tag, err := tx.Exec(ctx, query, cutoff)
+		if err != nil {
+			return CleanupResult{}, err
+		}
+		result.DiagnosticArtifactsPruned += tag.RowsAffected()
+	}
+
+	const deleteOldRuns = `
+		WITH ranked AS (
+			SELECT id, status,
+				ROW_NUMBER() OVER (PARTITION BY scenario_id ORDER BY created_at DESC) AS rn
+			FROM runs
+			WHERE completed_at IS NOT NULL AND completed_at < $1
+		),
+		eligible AS (
+			SELECT id FROM ranked
+			WHERE rn > $2
+			  AND status IN ('completed', 'failed', 'cancelled')
+		)
+		DELETE FROM runs
+		WHERE id IN (SELECT id FROM eligible)
+		RETURNING id
+	`
+	rows, err := tx.Query(ctx, deleteOldRuns, cutoff, maxRuns)
+	if err != nil {
+		return CleanupResult{}, err
+	}
+	deleted := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return CleanupResult{}, err
+		}
+		_ = id
+		deleted++
+	}
+	if err := rows.Err(); err != nil {
+		return CleanupResult{}, err
+	}
+	rows.Close()
+	result.RunsDeleted = int64(deleted)
+
+	if err := tx.Commit(ctx); err != nil {
+		return CleanupResult{}, err
+	}
+	return result, nil
 }
 
 // ---- diagnosis reports --------------------------------------------------

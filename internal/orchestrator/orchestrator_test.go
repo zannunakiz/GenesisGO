@@ -1,9 +1,13 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -13,8 +17,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/zannunakiz/GenesisGO/internal/invariants"
+	"github.com/zannunakiz/GenesisGO/internal/observability"
 	"github.com/zannunakiz/GenesisGO/internal/scenarios"
 	"github.com/zannunakiz/GenesisGO/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // passFixture is a committed-style scenario fixture satisfied by a single
@@ -53,13 +60,13 @@ func loaderWithFixture(t *testing.T, name, content string) *scenarios.Loader {
 type fakeStore struct {
 	mu sync.Mutex
 
-	runs        map[string]*store.Run
-	jobs        map[string]*store.RunJob // id -> job
-	jobsByRun   map[string][]*store.RunJob
-	scenarios   map[string]*store.Scenario // key -> scenario
-	sideEffects map[string][]*store.SideEffectRecord
-	attempts    map[string][]*store.EventAttempt // run_id -> attempts
-	invariants  map[string][]*store.InvariantResult
+	runs           map[string]*store.Run
+	jobs           map[string]*store.RunJob // id -> job
+	jobsByRun      map[string][]*store.RunJob
+	scenarios      map[string]*store.Scenario // key -> scenario
+	sideEffects    map[string][]*store.SideEffectRecord
+	attempts       map[string][]*store.EventAttempt // run_id -> attempts
+	invariants     map[string][]*store.InvariantResult
 	stateSnapshots map[string][]*store.StateSnapshot // run_id -> snapshots
 
 	// Claim behavior.
@@ -73,13 +80,13 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		runs:        make(map[string]*store.Run),
-		jobs:        make(map[string]*store.RunJob),
-		jobsByRun:   make(map[string][]*store.RunJob),
-		scenarios:   make(map[string]*store.Scenario),
-		sideEffects: make(map[string][]*store.SideEffectRecord),
-		attempts:    make(map[string][]*store.EventAttempt),
-		invariants:  make(map[string][]*store.InvariantResult),
+		runs:           make(map[string]*store.Run),
+		jobs:           make(map[string]*store.RunJob),
+		jobsByRun:      make(map[string][]*store.RunJob),
+		scenarios:      make(map[string]*store.Scenario),
+		sideEffects:    make(map[string][]*store.SideEffectRecord),
+		attempts:       make(map[string][]*store.EventAttempt),
+		invariants:     make(map[string][]*store.InvariantResult),
 		stateSnapshots: make(map[string][]*store.StateSnapshot),
 	}
 }
@@ -191,14 +198,14 @@ func (f *fakeStore) CreateEventAttempt(ctx context.Context, runID, eventID strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	a := &store.EventAttempt{
-		ID:              fxID("attempt"),
-		RunID:           runID,
-		EventID:         eventID,
-		AttemptNumber:   attemptNumber,
-		DeliveredAt:     deliveredAt,
-		AcknowledgedAt:  acknowledgedAt,
-		FaultInjected:   faultInjected,
-		CreatedAt:       time.Now().UTC(),
+		ID:             fxID("attempt"),
+		RunID:          runID,
+		EventID:        eventID,
+		AttemptNumber:  attemptNumber,
+		DeliveredAt:    deliveredAt,
+		AcknowledgedAt: acknowledgedAt,
+		FaultInjected:  faultInjected,
+		CreatedAt:      time.Now().UTC(),
 	}
 	f.attempts[runID] = append(f.attempts[runID], a)
 	return a, nil
@@ -479,6 +486,48 @@ func TestEnqueueScenarioCreatesRunAndJob(t *testing.T) {
 	}
 	if len(jobs) != 1 || jobs[0].Status != "queued" {
 		t.Fatalf("expected one queued job, got %+v", jobs)
+	}
+}
+
+func TestEnqueueScenarioPersistsTraceParentForWorker(t *testing.T) {
+	telemetry := observability.SetupTelemetry(
+		context.Background(),
+		"genesisgo-test",
+		"test",
+		"",
+		&bytes.Buffer{},
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	)
+	t.Cleanup(func() { _ = telemetry.Shutdown(context.Background()) })
+
+	apiCtx, apiSpan := otel.Tracer("test/api").Start(context.Background(), "api.create_run")
+	wantTraceID := trace.SpanContextFromContext(apiCtx).TraceID()
+	defer apiSpan.End()
+
+	st := newFakeStore()
+	loader := loaderWithFixture(t, "pass_safe", passFixture)
+	o := newOrchestrator(t, st, newFakeExecutor(), loader)
+	run, err := o.EnqueueScenario(apiCtx, "pass_safe")
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	jobs, err := st.ListRunJobsByRun(context.Background(), run.ID)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("expected one persisted job, jobs=%d err=%v", len(jobs), err)
+	}
+	var payload jobPayload
+	if err := json.Unmarshal(jobs[0].Payload, &payload); err != nil {
+		t.Fatalf("decode job payload: %v", err)
+	}
+	if payload.TraceContext["traceparent"] == "" {
+		t.Fatal("queued job is missing its W3C traceparent")
+	}
+
+	workerCtx := traceContextForJob(context.Background(), jobs[0].Payload)
+	_, workerSpan := otel.Tracer("test/worker").Start(workerCtx, "worker.run_job")
+	defer workerSpan.End()
+	if got := workerSpan.SpanContext().TraceID(); got != wantTraceID {
+		t.Fatalf("worker trace ID %s does not match API trace ID %s", got, wantTraceID)
 	}
 }
 

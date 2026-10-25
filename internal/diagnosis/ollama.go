@@ -12,6 +12,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/zannunakiz/GenesisGO/internal/observability"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ollamaChatRequest mirrors the Ollama /api/chat request body (non-streaming).
@@ -78,7 +84,21 @@ const (
 // Diagnose sends the minimum required evidence to Ollama and returns a parsed
 // diagnosis result. On any failure it returns (nil, err) so the caller can mark
 // diagnosis unavailable without affecting invariant verdicts.
-func (p *OllamaProvider) Diagnose(ctx context.Context, in Input) (*Result, error) {
+func (p *OllamaProvider) Diagnose(ctx context.Context, in Input) (result *Result, resultErr error) {
+	started := time.Now()
+	ctx, span := otel.Tracer("github.com/zannunakiz/GenesisGO/diagnosis").Start(ctx, "ai.diagnosis",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("genesisgo.ai.provider", "ollama")),
+	)
+	defer func() {
+		if resultErr != nil {
+			span.SetStatus(codes.Error, "diagnosis request failed")
+		}
+		span.End()
+		if metrics := observability.MetricsForProcess(); metrics != nil {
+			metrics.AI(ctx, time.Since(started), resultErr)
+		}
+	}()
 	if p == nil || p.baseURL == "" || p.model == "" || p.httpClient == nil {
 		return nil, errors.New(errMsgUnavailable)
 	}
@@ -143,7 +163,7 @@ func (p *OllamaProvider) Diagnose(ctx context.Context, in Input) (*Result, error
 
 	// Best-effort parse of structured JSON; fall back to the whole content as
 	// the summary so a non-JSON model response is still usable.
-	result := &Result{
+	result = &Result{
 		Summary:   &content,
 		Model:     &p.model,
 		CreatedAt: time.Now().UTC(),

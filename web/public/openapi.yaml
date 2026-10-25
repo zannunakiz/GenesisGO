@@ -1,0 +1,812 @@
+openapi: 3.1.0
+info:
+  title: GenesisGo API
+  version: 1.0.0
+  summary: Local event-reliability scenario and run API
+  description: >-
+    Control-plane API for built-in, synthetic reliability scenarios. API keys
+    are never returned by the API. Run data is scoped to each run identifier.
+servers:
+  - url: /
+    description: Same-origin local API proxy
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+tags:
+  - name: Health
+  - name: Scenarios
+  - name: Runs
+  - name: Reports
+  - name: Events
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Check process liveness
+      description: Does not require downstream services to be available.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Check API readiness
+      description: Reports configuration readiness for required dependencies.
+      security: []
+      responses:
+        '200':
+          description: API is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '503':
+          description: API is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Legacy liveness endpoint
+      description: Alias for /health/live.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/v1/scenarios:
+    get:
+      tags: [Scenarios]
+      summary: List built-in scenarios
+      description: Requires a key with read, run, or admin scope.
+      responses:
+        '200':
+          description: Available synthetic scenarios.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScenarioListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs:
+    get:
+      tags: [Runs]
+      summary: List runs
+      description: Requires a key with read, run, or admin scope. Results are newest first.
+      parameters:
+        - name: scenario_id
+          in: query
+          required: false
+          description: Filter by the persisted scenario UUID.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Zero selects the default; values above 100 are capped at 100.
+          schema:
+            type: integer
+            minimum: 0
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          description: Number of results to skip.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: A page of run summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/DefaultError'
+    post:
+      tags: [Runs]
+      summary: Create a scenario run
+      description: >-
+        Requires run or admin scope. Creates a pending run and queued job; a
+        worker must claim the job to execute it. Reusing an Idempotency-Key
+        returns the existing run with 200 instead of creating another run.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Optional key for process-scoped request deduplication.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+            example:
+              scenario_key: duplicate_delivery
+      responses:
+        '201':
+          description: Run and execution job created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '200':
+          description: Existing run returned for a repeated idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [Runs]
+      summary: Get a run
+      description: Requires a key with read, run, or admin scope.
+      responses:
+        '200':
+          description: Persisted run state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+    post:
+      tags: [Runs]
+      summary: Cancel a queued or running run
+      description: Requires run or admin scope. Terminal runs cannot be cancelled.
+      responses:
+        '200':
+          description: Cancelled run state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}/report:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [Reports]
+      summary: Get the reproducible run report
+      description: Requires a key with read, run, or admin scope.
+      responses:
+        '200':
+          description: Versioned report generated from persisted evidence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}/export:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [Reports]
+      summary: Download the run report as JSON
+      description: Requires a key with read, run, or admin scope.
+      responses:
+        '200':
+          description: JSON report attachment.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}/export.csv:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [Reports]
+      summary: Download the run summary as CSV
+      description: Requires a key with read, run, or admin scope.
+      responses:
+        '200':
+          description: CSV containing run metadata and invariant verdicts.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/DefaultError'
+  /api/v1/runs/{id}/events:
+    parameters:
+      - $ref: '#/components/parameters/RunID'
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: Resume by replaying buffered events after this event ID.
+        schema:
+          type: string
+    get:
+      tags: [Events]
+      summary: Stream run lifecycle events
+      description: >-
+        Requires a key with read, run, or admin scope. The response is an SSE
+        stream. Each message has an id line and a data line containing one JSON
+        LifecycleEvent. EventSource cannot set Authorization headers; use a
+        fetch-based SSE client or the documented X-API-Key header where supported.
+      responses:
+        '200':
+          description: Run-scoped server-sent events; reconnect with Last-Event-ID.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+            X-Accel-Buffering:
+              schema:
+                type: string
+                const: 'no'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                lifecycle:
+                  value: |-
+                    id: 1
+                    data: {"id":"1","type":"run.started","run_id":"00000000-0000-0000-0000-000000000001","timestamp":"2026-01-01T00:00:00Z"}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/DefaultError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: GenesisGo API key
+      description: Paste the one-time gg_ API key. It is not persisted by this reference UI.
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Alternative header for clients that cannot send Authorization.
+  parameters:
+    RunID:
+      name: id
+      in: path
+      required: true
+      description: UUID of the run.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Invalid JSON, field, or query parameter.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: API key lacks the required scope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Requested scenario, run, or report was not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: Run is terminal or cannot transition to cancelled.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    PayloadTooLarge:
+      description: Request exceeds the endpoint body limit (1 KiB for run creation).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    UnsupportedMediaType:
+      description: Request body must use application/json.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    MethodNotAllowed:
+      description: HTTP method is not supported for the endpoint.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    DefaultError:
+      description: Other API failure using the shared error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum: [invalid_json, invalid_field, unsupported_media_type, payload_too_large, unauthorized, forbidden, not_found, conflict, method_not_allowed, request_timeout, too_many_requests, service_unavailable, internal_error]
+        message:
+          type: string
+        request_id:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+    FieldError:
+      type: object
+      required: [field, reason]
+      properties:
+        field:
+          type: string
+        reason:
+          type: string
+    CreateRunRequest:
+      type: object
+      additionalProperties: false
+      required: [scenario_key]
+      properties:
+        scenario_key:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Key of a scenario returned by GET /api/v1/scenarios.
+    ScenarioSummary:
+      type: object
+      required: [key, version, name]
+      properties:
+        key:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        description:
+          type: string
+    ScenarioListResponse:
+      type: object
+      required: [scenarios]
+      properties:
+        scenarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioSummary'
+    Run:
+      type: object
+      required: [id, scenario_id, status, created_at, updated_at, attempt_count, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scenario_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        failure_reason:
+          type: string
+        cancellation_reason:
+          type: string
+        attempt_count:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 1
+    RunResponse:
+      type: object
+      required: [run]
+      properties:
+        run:
+          $ref: '#/components/schemas/Run'
+    RunSummary:
+      type: object
+      required: [id, scenario_id, status, created_at, attempt_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scenario_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        attempt_count:
+          type: integer
+          minimum: 0
+    RunListResponse:
+      type: object
+      required: [runs, total, limit, offset]
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunSummary'
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+    LiveResponse:
+      type: object
+      required: [status, uptime_seconds]
+      properties:
+        status:
+          type: string
+          const: ok
+        uptime_seconds:
+          type: integer
+          minimum: 0
+    HealthDependencies:
+      type: object
+      required: [database, nats, arcjet, ai]
+      properties:
+        database:
+          type: string
+          enum: [configured, not_configured]
+        nats:
+          type: string
+          enum: [configured, not_configured]
+        arcjet:
+          type: string
+          enum: [disabled, enabled]
+        ai:
+          type: string
+          enum: [configured, not_configured]
+    ReadyResponse:
+      type: object
+      required: [status, uptime_seconds, dependencies]
+      properties:
+        status:
+          type: string
+          enum: [ok, not_ready]
+        uptime_seconds:
+          type: integer
+          minimum: 0
+        dependencies:
+          $ref: '#/components/schemas/HealthDependencies'
+        missing:
+          type: array
+          items:
+            type: string
+    Report:
+      type: object
+      required: [schema_version, run, scenario, timestamps, event_attempts, fault_points, side_effect_diff, invariant_results]
+      properties:
+        schema_version:
+          type: string
+          const: 1.0.0
+        run:
+          $ref: '#/components/schemas/ReportRunSummary'
+        scenario:
+          $ref: '#/components/schemas/ReportScenarioSummary'
+        timestamps:
+          $ref: '#/components/schemas/ReportTimestamps'
+        event_attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventAttempt'
+        fault_points:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/FaultPoint'
+        side_effect_diff:
+          type: array
+          items:
+            $ref: '#/components/schemas/SnapshotPair'
+        invariant_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvariantResult'
+        error_details:
+          $ref: '#/components/schemas/ReportErrorDetails'
+        diagnosis:
+          $ref: '#/components/schemas/Diagnosis'
+    ReportRunSummary:
+      type: object
+      required: [id, scenario_id, status, attempt_count, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scenario_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        attempt_count:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 1
+    ReportScenarioSummary:
+      type: object
+      required: [key, name]
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+    ReportTimestamps:
+      type: object
+      required: [created_at, updated_at]
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    EventAttempt:
+      type: object
+      required: [id, event_id, attempt_number, delivered_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+        attempt_number:
+          type: integer
+          minimum: 1
+        delivered_at:
+          type: string
+          format: date-time
+        acknowledged_at:
+          type: string
+          format: date-time
+        fault_injected:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    FaultPoint:
+      type: object
+      required: [step_id, event_id, attempt_number, fault_type, delivered_at]
+      properties:
+        step_id:
+          type: string
+        event_id:
+          type: string
+        attempt_number:
+          type: integer
+          minimum: 1
+        fault_type:
+          type: string
+        delivered_at:
+          type: string
+          format: date-time
+    SnapshotPair:
+      type: object
+      required: [step_id, event_id, aggregate_id]
+      properties:
+        step_id:
+          type: string
+        event_id:
+          type: string
+        aggregate_id:
+          type: string
+        before:
+          $ref: '#/components/schemas/StateSnapshot'
+        after:
+          $ref: '#/components/schemas/StateSnapshot'
+    StateSnapshot:
+      type: object
+      required: [snapshot_type, aggregate_id, created_at]
+      properties:
+        snapshot_type:
+          type: string
+          enum: [before, after]
+        aggregate_id:
+          type: string
+        state_summary:
+          type: string
+          contentEncoding: base64
+        created_at:
+          type: string
+          format: date-time
+    InvariantResult:
+      type: object
+      required: [invariant_key, rule, verdict, expected, actual, evidence, evaluated_at]
+      properties:
+        invariant_key:
+          type: string
+        rule:
+          type: string
+        verdict:
+          type: string
+          enum: [pass, fail, not_evaluated]
+        expected:
+          type: string
+        actual:
+          type: string
+        evidence:
+          type: [array, 'null']
+          items:
+            type: string
+        evaluated_at:
+          type: string
+          format: date-time
+    ReportErrorDetails:
+      type: object
+      properties:
+        failure_reason:
+          type: string
+        cancellation_reason:
+          type: string
+    Diagnosis:
+      type: object
+      required: [created_at, source]
+      properties:
+        summary:
+          type: string
+        suggestions:
+          type: string
+          contentEncoding: base64
+        model:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        source:
+          type: string
+    LifecycleEvent:
+      type: object
+      required: [id, type, run_id, timestamp]
+      properties:
+        id:
+          type: string
+          description: Monotonic event ID within the run buffer.
+        type:
+          type: string
+          enum: [run.started, event.delivered, consumer.retrying, invariant.failed, run.completed]
+        run_id:
+          type: string
+          format: uuid
+        data:
+          description: Event-specific JSON payload.
+        timestamp:
+          type: string
+          format: date-time

@@ -2,7 +2,7 @@ GO ?= go
 NPM ?= npm
 STATICCHECK_VERSION ?= v0.8.2
 
-.PHONY: format lint test race-test integration-test build web-check web-build compose-up compose-down compose-ai compose-observability quality
+.PHONY: format lint test race-test integration-test build web-check web-build api-contract-check compose-up compose-down compose-ai compose-observability quality
 
 format:
 	$(GO) fmt ./...
@@ -29,6 +29,10 @@ web-check:
 	$(NPM) --prefix web run lint
 	$(NPM) --prefix web run typecheck
 	$(NPM) --prefix web test
+	$(NPM) --prefix web run api-contract-check
+
+api-contract-check:
+	$(NPM) --prefix web run api-contract-check
 
 web-build:
 	$(NPM) --prefix web run build

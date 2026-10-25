@@ -11,11 +11,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zannunakiz/GenesisGO/internal/app"
 	"github.com/zannunakiz/GenesisGO/internal/auth"
 	"github.com/zannunakiz/GenesisGO/internal/config"
 	"github.com/zannunakiz/GenesisGO/internal/httpapi"
+	"github.com/zannunakiz/GenesisGO/internal/invariants"
 	"github.com/zannunakiz/GenesisGO/internal/observability"
+	"github.com/zannunakiz/GenesisGO/internal/orchestrator"
 	"github.com/zannunakiz/GenesisGO/internal/protection"
+	"github.com/zannunakiz/GenesisGO/internal/report"
+	"github.com/zannunakiz/GenesisGO/internal/sampleconsumer"
+	"github.com/zannunakiz/GenesisGO/internal/scenarios"
+	"github.com/zannunakiz/GenesisGO/internal/sse"
+	"github.com/zannunakiz/GenesisGO/internal/store"
 )
 
 func main() {
@@ -36,11 +44,75 @@ func run(ctx context.Context) error {
 	}
 	logger := observability.NewLogger(os.Stdout, level)
 	startTime := time.Now()
+	telemetry := observability.SetupTelemetry(ctx, "genesisgo-api", cfg.Environment, cfg.TelemetryEndpoint, os.Stdout, logger)
 
 	authStore, err := loadAuthStore(cfg)
 	if err != nil {
 		return err
 	}
+
+	// Database and orchestration wiring for run/scenario endpoints.
+	pool, err := store.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("create database pool: %w", err)
+	}
+	defer pool.Close()
+	st := store.NewStore(pool)
+	if metrics := telemetry.Metrics(); metrics != nil {
+		metrics.SetQueueDepthReader(st.CountQueuedRunJobs)
+	}
+
+	// Record the effective, non-secret configuration as an audit event so
+	// startup-time configuration changes are visible in the audit trail.
+	if err := st.RecordAuditLog(ctx, "", "config.loaded", "",
+		fmt.Sprintf("env=%s listen=%s metrics=%s retention=%s max_runs=%d api_keys=%t arcjet=%t",
+			cfg.Environment, cfg.ListenAddress, cfg.MetricsListenAddress,
+			cfg.RetentionPeriod, cfg.MaxRuns, cfg.APIKeysEnabled, cfg.ArcjetEnabled)); err != nil {
+		logger.Warn("record configuration audit log: " + err.Error())
+	}
+
+	loader := scenarios.NewLoader("internal/scenarios/fixtures")
+	if _, err := loader.Load(); err != nil {
+		return fmt.Errorf("load scenarios: %w", err)
+	}
+
+	eng := invariants.NewEngine()
+	for _, r := range invariants.DefaultRules() {
+		eng.Register(r)
+	}
+
+	sample, err := sampleconsumer.New(sampleconsumer.Config{
+		Ledger: st,
+		Mode:   sampleconsumer.ModeSafe,
+	})
+	if err != nil {
+		return fmt.Errorf("create sample consumer: %w", err)
+	}
+
+	o, err := orchestrator.New(orchestrator.Config{
+		Store:             st,
+		Broker:            nil, // broker not needed for API-only wiring
+		ScenarioLoader:    loader,
+		Invariants:        eng,
+		SampleConsumer:    sample,
+		WorkerConcurrency: cfg.WorkerConcurrency,
+		RunTimeout:        cfg.RunTimeout,
+		LeaseTTL:          30 * time.Second,
+		Logger:            logger,
+	})
+	if err != nil {
+		return fmt.Errorf("create orchestrator: %w", err)
+	}
+
+	uc := app.NewUseCases(loader, st, o, o, &reportGen{store: st})
+	uc.WithAuditLogger(st)
+	hub := sse.NewHub(100)
+
+	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
+	ready := httpapi.ReadyHandler(apiReadyDeps(cfg, startTime))
+	mux := httpapi.NewMux(live, ready)
+	httpapi.Register(mux, uc, authStore, hub)
+
 	guard, err := protection.New(protection.Settings{
 		Enabled:           cfg.ArcjetEnabled,
 		Key:               cfg.ArcjetKey,
@@ -57,16 +129,23 @@ func run(ctx context.Context) error {
 		_ = guard.Close(closeCtx)
 	}()
 
-	live := httpapi.LiveHandler(httpapi.LiveDeps{StartTime: startTime})
-	ready := httpapi.ReadyHandler(apiReadyDeps(cfg, startTime))
-	mux := httpapi.NewMux(live, ready)
-	_ = authStore
 	handler := httpapi.RequestID(mux)
 	handler = httpapi.RequestLogger(logger)(handler)
 	handler = httpapi.Recover(handler)
 	handler = httpapi.Timeout(httpapi.DefaultTimeouts().HandlerTimeoutOrDefault())(handler)
+	handler = telemetry.HTTPMiddleware(handler)
 
 	srv := httpapi.WithTimeouts(&http.Server{Addr: cfg.ListenAddress, Handler: handler}, httpapi.DefaultTimeouts())
+	metricsSrv := &http.Server{
+		Addr:              cfg.MetricsListenAddress,
+		Handler:           telemetry.MetricsHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Warn("metrics endpoint unavailable; API remains available")
+		}
+	}()
 
 	startErr := make(chan error, 1)
 	go func() {
@@ -97,9 +176,10 @@ func run(ctx context.Context) error {
 		func(context.Context) {},
 		[]observability.Closer{
 			{Name: "http_server", Close: func(shutdown context.Context) error { return srv.Shutdown(shutdown) }},
+			{Name: "metrics_server", Close: func(shutdown context.Context) error { return metricsSrv.Shutdown(shutdown) }},
 			{Name: "database", Close: func(context.Context) error { return nil }},
 			{Name: "nats", Close: func(context.Context) error { return nil }},
-			{Name: "telemetry", Close: func(context.Context) error { return nil }},
+			{Name: "telemetry", Close: telemetry.Shutdown},
 		},
 	)
 }
@@ -133,4 +213,13 @@ func loadAuthStore(cfg config.Config) (auth.Store, error) {
 		return nil, fmt.Errorf("no API keys are configured; bootstrap one before starting production")
 	}
 	return store, nil
+}
+
+// reportGen adapts store.Store to the app.reportGenerator interface.
+type reportGen struct {
+	store *store.Store
+}
+
+func (g *reportGen) GenerateReport(ctx context.Context, runID string) (*report.Report, error) {
+	return report.GenerateReport(ctx, g.store, runID)
 }

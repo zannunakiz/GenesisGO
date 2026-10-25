@@ -14,23 +14,25 @@ import (
 )
 
 const (
-	defaultListenAddress      = "127.0.0.1:8080"
-	defaultDatabaseURL        = "postgres://localhost:5432/genesisgo?sslmode=disable"
-	defaultNATSURL            = "nats://127.0.0.1:4222"
-	defaultWorkerConcurrency  = 4
-	defaultRunTimeout         = 2 * time.Minute
-	defaultMaxEventsPerRun    = 1_000
-	defaultMaxRequestBodySize = 1 << 20
-	defaultLogLevel           = "info"
-	defaultCORSOrigins        = "http://localhost:3000"
-	defaultRetentionPeriod    = 24 * time.Hour
-	defaultMaxRuns            = 1_000
+	defaultListenAddress        = "127.0.0.1:8080"
+	defaultMetricsListenAddress = "127.0.0.1:9090"
+	defaultDatabaseURL          = "postgres://localhost:5432/genesisgo?sslmode=disable"
+	defaultNATSURL              = "nats://127.0.0.1:4222"
+	defaultWorkerConcurrency    = 4
+	defaultRunTimeout           = 2 * time.Minute
+	defaultMaxEventsPerRun      = 1_000
+	defaultMaxRequestBodySize   = 1 << 20
+	defaultLogLevel             = "info"
+	defaultCORSOrigins          = "http://localhost:3000"
+	defaultRetentionPeriod      = 24 * time.Hour
+	defaultMaxRuns              = 1_000
 )
 
 // Config contains validated runtime settings. Secret values must not be logged.
 type Config struct {
 	Environment             string
 	ListenAddress           string
+	MetricsListenAddress    string
 	DatabaseURL             string
 	NATSURL                 string
 	WorkerConcurrency       int
@@ -79,7 +81,11 @@ func loadFrom(get lookup) (Config, error) {
 	}
 
 	cfg.ListenAddress = value(get, "LISTEN_ADDR", defaultListenAddress)
-	if err := validateListenAddress(cfg.ListenAddress); err != nil {
+	if err := validateListenAddress("LISTEN_ADDR", cfg.ListenAddress); err != nil {
+		return Config{}, err
+	}
+	cfg.MetricsListenAddress = value(get, "METRICS_LISTEN_ADDR", defaultMetricsListenAddress)
+	if err := validateListenAddress("METRICS_LISTEN_ADDR", cfg.MetricsListenAddress); err != nil {
 		return Config{}, err
 	}
 
@@ -289,17 +295,17 @@ func parseTrustedProxies(raw string) []string {
 	return out
 }
 
-func validateListenAddress(address string) error {
+func validateListenAddress(key, address string) error {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || host == "" && strings.Count(address, ":") == 0 {
-		return errors.New("LISTEN_ADDR must be a host:port address")
+		return fmt.Errorf("%s must be a host:port address", key)
 	}
 	if strings.ContainsAny(host, " \t\r\n") {
-		return errors.New("LISTEN_ADDR must not contain whitespace in the host")
+		return fmt.Errorf("%s must not contain whitespace in the host", key)
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return errors.New("LISTEN_ADDR must contain a valid TCP port")
+		return fmt.Errorf("%s must contain a valid TCP port", key)
 	}
 	return nil
 }

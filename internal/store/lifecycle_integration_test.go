@@ -58,13 +58,21 @@ func TestTransitionRunLifecycle(t *testing.T) {
 	ctx := context.Background()
 	scenarioID := lifecycleSeedScenario(t, store)
 	runID := lifecycleCreateRun(t, store, scenarioID)
+	cancelRunID := lifecycleCreateRun(t, store, scenarioID)
+	cancelledRun, err := store.CancelRun(ctx, cancelRunID, 1, "cancelled by integration test")
+	if err != nil {
+		t.Fatalf("cancel pending run: %v", err)
+	}
+	if cancelledRun.Status != string(RunStateCancelled) {
+		t.Fatalf("expected cancelled, got %q", cancelledRun.Status)
+	}
 
 	// pending -> running is allowed.
 	run, err := store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStatePending,
-		To:             RunStateRunning,
-		Reason:         "worker picked up run",
+		RunID:           runID,
+		From:            RunStatePending,
+		To:              RunStateRunning,
+		Reason:          "worker picked up run",
 		ExpectedVersion: 1,
 	})
 	if err != nil {
@@ -82,10 +90,10 @@ func TestTransitionRunLifecycle(t *testing.T) {
 
 	// running -> completed is allowed.
 	run, err = store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStateRunning,
-		To:             RunStateCompleted,
-		Reason:         "execution finished",
+		RunID:           runID,
+		From:            RunStateRunning,
+		To:              RunStateCompleted,
+		Reason:          "execution finished",
 		ExpectedVersion: run.Version,
 	})
 	if err != nil {
@@ -97,10 +105,10 @@ func TestTransitionRunLifecycle(t *testing.T) {
 
 	// completed is terminal: completed -> failed must be rejected.
 	_, err = store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStateCompleted,
-		To:             RunStateFailed,
-		Reason:         "should not happen",
+		RunID:           runID,
+		From:            RunStateCompleted,
+		To:              RunStateFailed,
+		Reason:          "should not happen",
 		ExpectedVersion: run.Version,
 	})
 	if err == nil {
@@ -117,10 +125,10 @@ func TestTransitionRunLifecycle(t *testing.T) {
 		t.Fatalf("get run: %v", err)
 	}
 	_, err = store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStateRunning,
-		To:             RunStateCompleted,
-		Reason:         "stale duplicate",
+		RunID:           runID,
+		From:            RunStateRunning,
+		To:              RunStateCompleted,
+		Reason:          "stale duplicate",
 		ExpectedVersion: current.Version, // version is now 3, but from=running doesn't match
 	})
 	if err == nil {
@@ -136,10 +144,10 @@ func TestTransitionRunConcurrentUpdate(t *testing.T) {
 
 	// First transition succeeds: pending -> running, version 1 -> 2.
 	_, err := store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStatePending,
-		To:             RunStateRunning,
-		Reason:         "first worker",
+		RunID:           runID,
+		From:            RunStatePending,
+		To:              RunStateRunning,
+		Reason:          "first worker",
 		ExpectedVersion: 1,
 	})
 	if err != nil {
@@ -148,10 +156,10 @@ func TestTransitionRunConcurrentUpdate(t *testing.T) {
 
 	// Second transition with stale version (1) should fail with ErrConcurrentUpdate.
 	_, err = store.TransitionRun(ctx, TransitionInput{
-		RunID:          runID,
-		From:           RunStatePending,
-		To:             RunStateCancelled,
-		Reason:         "stale worker",
+		RunID:           runID,
+		From:            RunStatePending,
+		To:              RunStateCancelled,
+		Reason:          "stale worker",
 		ExpectedVersion: 1,
 	})
 	if err == nil {
@@ -166,10 +174,10 @@ func TestTransitionRunMissingRun(t *testing.T) {
 	store := NewStore(lifecycleTestPool(t))
 	ctx := context.Background()
 	_, err := store.TransitionRun(ctx, TransitionInput{
-		RunID:          "00000000-0000-0000-0000-000000000000",
-		From:           RunStatePending,
-		To:             RunStateRunning,
-		Reason:         "no such run",
+		RunID:           "00000000-0000-0000-0000-000000000000",
+		From:            RunStatePending,
+		To:              RunStateRunning,
+		Reason:          "no such run",
 		ExpectedVersion: 1,
 	})
 	if err == nil {

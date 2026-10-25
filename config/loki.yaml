@@ -1,0 +1,30 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki-data
+  storage:
+    filesystem:
+      chunks_directory: /loki-data/chunks
+      rules_directory: /loki-data/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema:
+  version: 13
+  config:
+    - from: 2020-10-20
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 168h
+
+ruler:
+  alertmanager_url: http://localhost:9093

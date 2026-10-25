@@ -82,10 +82,10 @@ func IsTerminal(s RunState) bool {
 
 // TransitionInput carries everything needed to atomically advance a run.
 type TransitionInput struct {
-	RunID          string
-	From           RunState
-	To             RunState
-	Reason         string
+	RunID           string
+	From            RunState
+	To              RunState
+	Reason          string
 	ExpectedVersion int32
 }
 
@@ -105,23 +105,21 @@ func TransitionRun(ctx context.Context, q queryer, input TransitionInput) (*Run,
 
 	const updateQuery = `
 		UPDATE runs
-		SET status = $2, version = version + 1, updated_at = now(),
-			started_at = COALESCE(started_at, CASE WHEN $2 = $3 THEN now() ELSE started_at END),
-			completed_at = CASE WHEN $2 IN ($4, $5, $6) THEN now() ELSE completed_at END,
-			failure_reason = CASE WHEN $2 = $7 THEN $8 ELSE failure_reason END,
-			cancellation_reason = CASE WHEN $2 = $9 THEN $8 ELSE cancellation_reason END,
+		SET status = $2::run_status, version = version + 1, updated_at = now(),
+			started_at = COALESCE(started_at, CASE WHEN $2::text = 'running' THEN now() ELSE started_at END),
+			completed_at = CASE WHEN $2::text IN ('completed', 'failed', 'cancelled') THEN now() ELSE completed_at END,
+			failure_reason = CASE WHEN $2::text = 'failed' THEN $3 ELSE failure_reason END,
+			cancellation_reason = CASE WHEN $2::text = 'cancelled' THEN $3 ELSE cancellation_reason END,
 			attempt_count = attempt_count + 1
-		WHERE id = $1 AND status = $10 AND version = $11
+		WHERE id = $1 AND status = $4::run_status AND version = $5
 		RETURNING id, scenario_id, status, created_at, started_at, completed_at, updated_at, failure_reason, cancellation_reason, attempt_count, version
 	`
 	row := q.QueryRow(ctx, updateQuery,
 		input.RunID,
 		input.To,
-		RunStateRunning,
-		RunStateCompleted, RunStateFailed, RunStateCancelled,
-		RunStateFailed, input.Reason,
-		RunStateCancelled, input.Reason,
-		input.From, input.ExpectedVersion,
+		input.Reason,
+		input.From,
+		input.ExpectedVersion,
 	)
 	run, err := scanRun(row)
 	if err != nil {
