@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
+    "api-contract-check": "node scripts/check-openapi.mjs",
     "format": "biome format --write src",
     "lint": "biome lint src",
     "typecheck": "tsc --noEmit"
@@ -14,9 +15,11 @@
   "dependencies": {
     "next": "16.4.2",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "swagger-ui-dist": "^5.34.0"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^13.1.0",
     "@biomejs/biome": "^2.5.15",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",

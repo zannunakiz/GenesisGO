@@ -281,6 +281,7 @@ export default function ControlPanel() {
             Choose a scenario and start a controlled run to observe fault-injection
             behaviour and deterministic invariant results.
           </p>
+          <a href="/api-docs">Open API reference</a>
 
           {scenarioLoading && <p className={styles.status} role="status">Loading scenarios...</p>}
           {!scenarioLoading && scenarios.length === 0 && (
