@@ -39,7 +39,7 @@ func (f *fakeRunStore) GetRun(ctx context.Context, id string) (*store.Run, error
 	f.getMu[id] = struct{}{}
 	run, ok := f.runs[id]
 	if !ok {
-		return nil, pgxErrNoRows
+		return nil, errNoRows
 	}
 	return run, nil
 }
@@ -78,7 +78,7 @@ func (f *fakeRunStore) addRun(key, status string) *store.Run {
 	return run
 }
 
-var pgxErrNoRows = errors.New("no rows in result set")
+var errNoRows = errors.New("no rows in result set")
 
 // fakeRunCreator creates runs via the orchestrator interface and mirrors them
 // into a fakeRunStore so GetRun can find them (simulating the real store).
@@ -129,7 +129,7 @@ func (f *fakeRunCanceler) CancelRun(ctx context.Context, runID string) (*store.R
 	}
 	run, ok := f.store.runs[runID]
 	if !ok {
-		return nil, pgxErrNoRows
+		return nil, errNoRows
 	}
 	if store.IsTerminal(store.RunState(run.Status)) {
 		return nil, fmt.Errorf("%w: run %q is already terminal (%q)", store.ErrInvalidTransition, runID, run.Status)
@@ -347,8 +347,8 @@ func TestGetRunReturnsNotFoundForMissing(t *testing.T) {
 	st := newFakeRunStore()
 	uc := NewUseCases(&fakeScenarioLoader{}, st, &fakeRunCreator{}, newFakeRunCanceler(st), &fakeReportGenerator{})
 
-	if _, err := uc.GetRun(context.Background(), "no-such-run"); !errors.Is(err, pgxErrNoRows) {
-		t.Fatalf("expected pgxErrNoRows, got %v", err)
+	if _, err := uc.GetRun(context.Background(), "no-such-run"); !errors.Is(err, errNoRows) {
+		t.Fatalf("expected errNoRows, got %v", err)
 	}
 }
 
@@ -408,7 +408,7 @@ func TestCancelRunNotFound(t *testing.T) {
 	canceler := newFakeRunCanceler(st)
 	uc := NewUseCases(&fakeScenarioLoader{}, st, creator, canceler, &fakeReportGenerator{})
 
-	if _, err := uc.CancelRun(context.Background(), "no-such-run"); !errors.Is(err, pgxErrNoRows) {
-		t.Fatalf("expected pgxErrNoRows for missing run, got %v", err)
+	if _, err := uc.CancelRun(context.Background(), "no-such-run"); !errors.Is(err, errNoRows) {
+		t.Fatalf("expected errNoRows for missing run, got %v", err)
 	}
 }

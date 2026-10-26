@@ -469,21 +469,6 @@ const workerRestartFixture = `{
   "seed": 2024
 }`
 
-// attemptFaults returns the fault_injected value for a run's attempts of one
-// event, in record order (empty string when no fault was injected).
-func attemptFaults(t *testing.T, st *fakeStore, runID, eventID string) []string {
-	t.Helper()
-	var out []string
-	for _, a := range st.attemptsFor(runID, eventID) {
-		if a.FaultInjected != nil {
-			out = append(out, *a.FaultInjected)
-		} else {
-			out = append(out, "")
-		}
-	}
-	return out
-}
-
 func TestRetryAfterTimeoutAppliesEffectOnce(t *testing.T) {
 	o, st, fb := newScenarioExecutor(t, sampleconsumer.ModeSafe, retryAfterTimeoutFixture)
 

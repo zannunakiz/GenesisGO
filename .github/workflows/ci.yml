@@ -81,7 +81,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Filesystem scan (vulnerabilities, secrets, config)
-        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        uses: aquasecurity/trivy-action@v0.33.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -98,7 +98,7 @@ jobs:
           docker build --target sample-consumer -t genesisgo:ci-sample-consumer .
           docker build --target web -t genesisgo:ci-web .
       - name: Image vulnerability scan (api)
-        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        uses: aquasecurity/trivy-action@v0.33.0
         with:
           scan-type: 'image'
           image-ref: 'genesisgo:ci-api'
@@ -107,14 +107,14 @@ jobs:
           ignore-unfixed: 'true'
           scanners: 'vuln'
       - name: Configuration scan (misconfiguration)
-        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        uses: aquasecurity/trivy-action@v0.33.0
         with:
           scan-type: 'config'
           scan-ref: '.'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
       - name: Generate SBOM (api image, CycloneDX)
-        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        uses: aquasecurity/trivy-action@v0.33.0
         with:
           scan-type: 'sbom'
           image-ref: 'genesisgo:ci-api'

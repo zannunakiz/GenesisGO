@@ -56,11 +56,6 @@ func paymentPayload(aggregate, idem string, amount int64) []byte {
 	return []byte(p)
 }
 
-func inventoryPayload(aggregate, idem string, amount int64) []byte {
-	p := `{"type":"inventory.adjusted","aggregate_id":"` + aggregate + `","amount_cents":` + itoa(amount) + `,"currency":"USD","idempotency_key":"` + idem + `"}`
-	return []byte(p)
-}
-
 func itoa(n int64) string {
 	if n == 0 {
 		return "0"
