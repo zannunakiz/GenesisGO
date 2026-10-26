@@ -54,20 +54,20 @@ var allowedEventTypes = map[EventType]bool{
 // It carries the business payload as raw JSON so the envelope itself remains
 // type-agnostic while the payload is validated separately.
 type EventEnvelope struct {
-	EventID      string          `json:"event_id"`
-	EventType    EventType       `json:"event_type"`
-	SchemaVersion int            `json:"schema_version"`
-	OccurredAt   time.Time       `json:"occurred_at"`
-	RunID        string          `json:"run_id"`
-	Payload      json.RawMessage `json:"payload"`
+	EventID       string          `json:"event_id"`
+	EventType     EventType       `json:"event_type"`
+	SchemaVersion int             `json:"schema_version"`
+	OccurredAt    time.Time       `json:"occurred_at"`
+	RunID         string          `json:"run_id"`
+	Payload       json.RawMessage `json:"payload"`
 }
 
 // EnvelopeError describes why an envelope was rejected, without echoing raw
 // input values back to callers.
 type EnvelopeError struct {
-	Field   string
-	Reason  string
-	Inner   error
+	Field  string
+	Reason string
+	Inner  error
 }
 
 func (e *EnvelopeError) Error() string {

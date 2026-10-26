@@ -67,12 +67,12 @@ func (f *fakeRunStore) ListRunsByScenario(ctx context.Context, scenarioID string
 func (f *fakeRunStore) addRun(key, status string) *store.Run {
 	f.counter++
 	run := &store.Run{
-		ID:          fmt.Sprintf("run-%s-%d", key, f.counter),
-		ScenarioID:  key,
-		Status:      status,
-		CreatedAt:   time.Now().UTC(),
+		ID:           fmt.Sprintf("run-%s-%d", key, f.counter),
+		ScenarioID:   key,
+		Status:       status,
+		CreatedAt:    time.Now().UTC(),
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 	f.runs[run.ID] = run
 	return run
@@ -98,12 +98,12 @@ func (f *fakeRunCreator) EnqueueScenario(ctx context.Context, scenarioKey string
 		return nil, orchestrator.ErrScenarioNotFound
 	}
 	run := &store.Run{
-		ID:          fmt.Sprintf("run-%s-%d", scenarioKey, f.count),
-		ScenarioID:  scenarioKey,
-		Status:      string(store.RunStatePending),
-		CreatedAt:   time.Now().UTC(),
+		ID:           fmt.Sprintf("run-%s-%d", scenarioKey, f.count),
+		ScenarioID:   scenarioKey,
+		Status:       string(store.RunStatePending),
+		CreatedAt:    time.Now().UTC(),
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 	if f.store != nil {
 		f.store.runs[run.ID] = run
@@ -155,7 +155,7 @@ func (f *fakeReportGenerator) GenerateReport(ctx context.Context, runID string) 
 func TestListScenariosReturnsSortedSummaries(t *testing.T) {
 	loader := &fakeScenarioLoader{
 		fixtures: map[string]*scenarios.Scenario{
-			"zeta": {Key: "zeta", Version: 2, Name: "Zeta Scenario", Description: "desc z"},
+			"zeta":  {Key: "zeta", Version: 2, Name: "Zeta Scenario", Description: "desc z"},
 			"alpha": {Key: "alpha", Version: 1, Name: "Alpha Scenario", Description: "desc a"},
 		},
 	}

@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: only read repository contents. No secrets, no deployment.
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # Go: formatting, static analysis, build, unit, race and integration
+  # ------------------------------------------------------------------ #
+  go:
+    name: Go quality and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache-dependency-path: |
+            go.sum
+      - name: Go formatting check
+        run: test -z "$(gofmt -l .)"
+      - name: Go vet
+        run: go vet ./...
+      - name: Static analysis (staticcheck)
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: Build (all build tags)
+        run: go build -tags=integration ./...
+      - name: Unit tests
+        run: go test ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Integration tests
+        run: go test -tags=integration ./internal/integration/...
+
+  # --------------------------------------------------------------- #
+  # Frontend: install, lint, typecheck, tests, contract check, build
+  # --------------------------------------------------------------- #
+  frontend:
+    name: Frontend checks and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci --prefix web
+      - name: Lint
+        run: npm --prefix web run lint
+      - name: Typecheck
+        run: npm --prefix web run typecheck
+      - name: Tests
+        run: npm --prefix web run test
+      - name: API contract check
+        run: npm --prefix web run api-contract-check
+      - name: Build
+        run: npm --prefix web run build
+
+  # --------------------------------------------------------------- #
+  # Supply chain: fs vuln/secret/config scan, Docker build, image
+  # scan, config scan, CycloneDX SBOM. No paid keys, no secrets.
+  # --------------------------------------------------------------- #
+  supply-chain:
+    name: Supply-chain and image scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Filesystem scan (vulnerabilities, secrets, config)
+        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: 'true'
+          scanners: 'vuln,secret,config'
+          skip-dirs: 'node_modules,.next,.git'
+          skip-files: '.env.example'
+      - name: Build Docker images
+        run: |
+          docker build --target api -t genesisgo:ci-api .
+          docker build --target worker -t genesisgo:ci-worker .
+          docker build --target sample-consumer -t genesisgo:ci-sample-consumer .
+          docker build --target web -t genesisgo:ci-web .
+      - name: Image vulnerability scan (api)
+        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        with:
+          scan-type: 'image'
+          image-ref: 'genesisgo:ci-api'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: 'true'
+          scanners: 'vuln'
+      - name: Configuration scan (misconfiguration)
+        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+      - name: Generate SBOM (api image, CycloneDX)
+        uses: aquasecurity/trivy-action@f9424c10c36e288d5fa79bd3dfd1aeb2d6eae808
+        with:
+          scan-type: 'sbom'
+          image-ref: 'genesisgo:ci-api'
+          format: 'cyclonedx'
+          output: 'sbom-api.cyclonedx.json'

@@ -33,18 +33,19 @@ type ReportStore interface {
 	ListStateSnapshotsByRun(ctx context.Context, runID string) ([]*store.StateSnapshot, error)
 	ListInvariantResultsByRun(ctx context.Context, runID string) ([]*store.InvariantResult, error)
 }
+
 // Report is a versioned, reproducible run report.
 type Report struct {
-	SchemaVersion    string               `json:"schema_version"`
-	Run              RunSummary           `json:"run"`
-	Scenario         ScenarioSummary      `json:"scenario"`
-	Timestamps       Timestamps           `json:"timestamps"`
-	EventAttempts    []EventAttemptEntry  `json:"event_attempts"`
-	FaultPoints      []FaultPointEntry    `json:"fault_points"`
-	SideEffectDiff   []SnapshotPair       `json:"side_effect_diff"`
+	SchemaVersion    string                 `json:"schema_version"`
+	Run              RunSummary             `json:"run"`
+	Scenario         ScenarioSummary        `json:"scenario"`
+	Timestamps       Timestamps             `json:"timestamps"`
+	EventAttempts    []EventAttemptEntry    `json:"event_attempts"`
+	FaultPoints      []FaultPointEntry      `json:"fault_points"`
+	SideEffectDiff   []SnapshotPair         `json:"side_effect_diff"`
 	InvariantResults []InvariantResultEntry `json:"invariant_results"`
-	ErrorDetails     *ErrorDetails        `json:"error_details,omitempty"`
-	Diagnosis        *DiagnosisSection    `json:"diagnosis,omitempty"`
+	ErrorDetails     *ErrorDetails          `json:"error_details,omitempty"`
+	Diagnosis        *DiagnosisSection      `json:"diagnosis,omitempty"`
 }
 
 // RunSummary summarizes a run without exposing sensitive fields.
@@ -84,18 +85,18 @@ type EventAttemptEntry struct {
 
 // FaultPointEntry records a scenario-injected fault point.
 type FaultPointEntry struct {
-	StepID        string     `json:"step_id"`
-	EventID       string     `json:"event_id"`
-	AttemptNumber int32      `json:"attempt_number"`
-	FaultType     string     `json:"fault_type"`
-	DeliveredAt   time.Time  `json:"delivered_at"`
+	StepID        string    `json:"step_id"`
+	EventID       string    `json:"event_id"`
+	AttemptNumber int32     `json:"attempt_number"`
+	FaultType     string    `json:"fault_type"`
+	DeliveredAt   time.Time `json:"delivered_at"`
 }
 
 // SnapshotPair pairs before/after state snapshots for a single delivery.
 type SnapshotPair struct {
-	StepID      string             `json:"step_id"`
-	EventID     string             `json:"event_id"`
-	AggregateID string             `json:"aggregate_id"`
+	StepID      string              `json:"step_id"`
+	EventID     string              `json:"event_id"`
+	AggregateID string              `json:"aggregate_id"`
 	Before      *StateSnapshotEntry `json:"before,omitempty"`
 	After       *StateSnapshotEntry `json:"after,omitempty"`
 }
@@ -129,11 +130,11 @@ type ErrorDetails struct {
 // It is separate from deterministic facts so reviewers can distinguish
 // hypotheses from verified results.
 type DiagnosisSection struct {
-	Summary     *string `json:"summary,omitempty"`
-	Suggestions []byte  `json:"suggestions,omitempty"`
-	Model       *string `json:"model,omitempty"`
+	Summary     *string   `json:"summary,omitempty"`
+	Suggestions []byte    `json:"suggestions,omitempty"`
+	Model       *string   `json:"model,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
-	Source      string  `json:"source"`
+	Source      string    `json:"source"`
 }
 
 // GenerateReport builds a complete report for a run from persisted evidence.
@@ -226,7 +227,7 @@ func GenerateReport(ctx context.Context, st ReportStore, runID string) (*Report,
 	}
 
 	report := &Report{
-		SchemaVersion:     SchemaVersion,
+		SchemaVersion: SchemaVersion,
 		Run: RunSummary{
 			ID:           run.ID,
 			ScenarioID:   run.ScenarioID,
@@ -245,11 +246,11 @@ func GenerateReport(ctx context.Context, st ReportStore, runID string) (*Report,
 			CompletedAt: run.CompletedAt,
 			UpdatedAt:   run.UpdatedAt,
 		},
-		EventAttempts:   attemptEntries,
-		FaultPoints:     faultPoints,
-		SideEffectDiff:  sideEffectDiff,
+		EventAttempts:    attemptEntries,
+		FaultPoints:      faultPoints,
+		SideEffectDiff:   sideEffectDiff,
 		InvariantResults: invariantEntries,
-		ErrorDetails:    errorDetails,
+		ErrorDetails:     errorDetails,
 	}
 
 	return report, nil
@@ -263,10 +264,10 @@ func buildFaultPoints(attempts []*store.EventAttempt) []FaultPointEntry {
 			continue
 		}
 		faults = append(faults, FaultPointEntry{
-			EventID:        a.EventID,
-			AttemptNumber:  a.AttemptNumber,
-			FaultType:      *a.FaultInjected,
-			DeliveredAt:    a.DeliveredAt,
+			EventID:       a.EventID,
+			AttemptNumber: a.AttemptNumber,
+			FaultType:     *a.FaultInjected,
+			DeliveredAt:   a.DeliveredAt,
 		})
 	}
 	return faults

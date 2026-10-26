@@ -1,0 +1,17 @@
+{
+  "key": "normal_payment",
+  "version": 1,
+  "name": "Normal Payment Processing",
+  "description": "A payment event is delivered and acknowledged exactly once, verifying the happy path produces a single business effect with no duplication.",
+  "steps": [
+    { "id": "publish-1", "type": "publish", "event_id": "evt-pay-000", "payload": { "type": "payment.succeeded", "aggregate_id": "order-000", "amount_cents": 1500, "currency": "USD", "idempotency_key": "pay-order-000" } },
+    { "id": "deliver-1", "type": "deliver", "event_id": "evt-pay-000", "attempt": 1 },
+    { "id": "ack-1", "type": "ack", "event_id": "evt-pay-000" }
+  ],
+  "parameters": { "max_events": 5, "max_retries": 3, "timeout_ms": 15000, "concurrency": 1 },
+  "invariants": [
+    { "key": "no_duplicate_payment", "type": "no_duplicate_effect", "effect_type": "payment", "aggregate": "order-000" },
+    { "key": "idempotency_key_unique", "type": "idempotency_key_unique", "effect_type": "payment" }
+  ],
+  "seed": 0
+}

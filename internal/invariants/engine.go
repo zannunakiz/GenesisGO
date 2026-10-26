@@ -44,7 +44,7 @@ type EffectRecord struct {
 // built from persisted side-effect records for a single run; evidence from
 // different runs is never mixed.
 type Evidence struct {
-	RunID  string         `json:"run_id"`
+	RunID   string         `json:"run_id"`
 	Effects []EffectRecord `json:"effects"`
 }
 

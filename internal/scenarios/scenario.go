@@ -17,70 +17,70 @@ import (
 // the orchestrator executes, bounded execution parameters, expected business
 // invariants, and an optional deterministic seed.
 type Scenario struct {
-	Key         string     `json:"key"`
-	Version     int        `json:"version"`
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	Steps       []Step     `json:"steps"`
-	Parameters  Parameters `json:"parameters"`
+	Key         string      `json:"key"`
+	Version     int         `json:"version"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Steps       []Step      `json:"steps"`
+	Parameters  Parameters  `json:"parameters"`
 	Invariants  []Invariant `json:"invariants"`
-	Seed        int64      `json:"seed,omitempty"`
+	Seed        int64       `json:"seed,omitempty"`
 }
 
 // Step is a single bounded action executed within a scenario run.
 type Step struct {
-	ID        string            `json:"id"`
-	Type      string            `json:"type"` // publish, deliver, ack, crash, restart, delay
-	EventID   string            `json:"event_id,omitempty"`
-	Attempt   int               `json:"attempt,omitempty"`
-	Fault     string            `json:"fault,omitempty"` // duplicate, out_of_order, retry, crash_after_commit
-	DelayMs   int               `json:"delay_ms,omitempty"`
-	Payload   map[string]any    `json:"payload,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	ID       string            `json:"id"`
+	Type     string            `json:"type"` // publish, deliver, ack, crash, restart, delay
+	EventID  string            `json:"event_id,omitempty"`
+	Attempt  int               `json:"attempt,omitempty"`
+	Fault    string            `json:"fault,omitempty"` // duplicate, out_of_order, retry, crash_after_commit
+	DelayMs  int               `json:"delay_ms,omitempty"`
+	Payload  map[string]any    `json:"payload,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // Parameters bounds scenario execution to keep runs safe and predictable.
 type Parameters struct {
-	MaxEvents   int `json:"max_events"`   // max events per scenario run
-	MaxRetries  int `json:"max_retries"`  // max redelivery attempts
-	TimeoutMs   int `json:"timeout_ms"`   // per-step timeout
-	Concurrency int `json:"concurrency"`  // max concurrent workers
+	MaxEvents   int `json:"max_events"`  // max events per scenario run
+	MaxRetries  int `json:"max_retries"` // max redelivery attempts
+	TimeoutMs   int `json:"timeout_ms"`  // per-step timeout
+	Concurrency int `json:"concurrency"` // max concurrent workers
 }
 
 // Invariant is an expected business rule the scenario must satisfy.
 type Invariant struct {
-	Key       string            `json:"key"`
-	Type      string            `json:"type"` // no_duplicate_effect, no_negative_inventory, idempotency_key_unique, allowed_order_transition
-	EffectType string           `json:"effect_type,omitempty"`
-	Aggregate  string           `json:"aggregate,omitempty"`
-	Details   map[string]any    `json:"details,omitempty"`
+	Key        string         `json:"key"`
+	Type       string         `json:"type"` // no_duplicate_effect, no_negative_inventory, idempotency_key_unique, allowed_order_transition
+	EffectType string         `json:"effect_type,omitempty"`
+	Aggregate  string         `json:"aggregate,omitempty"`
+	Details    map[string]any `json:"details,omitempty"`
 }
 
 // allowlisted step types.
 var allowedStepTypes = map[string]bool{
-	"publish":  true,
-	"deliver":  true,
-	"ack":      true,
-	"crash":    true,
-	"restart":  true,
-	"delay":    true,
+	"publish": true,
+	"deliver": true,
+	"ack":     true,
+	"crash":   true,
+	"restart": true,
+	"delay":   true,
 }
 
 // allowlisted fault types.
 var allowedFaultTypes = map[string]bool{
-	"":                    true, // no fault
-	"duplicate":           true,
-	"out_of_order":        true,
-	"retry":               true,
-	"crash_after_commit":  true,
+	"":                   true, // no fault
+	"duplicate":          true,
+	"out_of_order":       true,
+	"retry":              true,
+	"crash_after_commit": true,
 }
 
 // allowlisted invariant types.
 var allowedInvariantTypes = map[string]bool{
-	"no_duplicate_effect":          true,
-	"no_negative_inventory":        true,
-	"idempotency_key_unique":       true,
-	"allowed_order_transition":     true,
+	"no_duplicate_effect":      true,
+	"no_negative_inventory":    true,
+	"idempotency_key_unique":   true,
+	"allowed_order_transition": true,
 }
 
 // keyPattern validates scenario keys (lowercase, alphanumeric + underscores).

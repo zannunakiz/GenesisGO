@@ -15,13 +15,13 @@ import (
 // RejectedEvent is the store-side view of a rejected event, mirrored from the
 // events package for persistence.
 type RejectedEvent struct {
-	ID         string     `json:"id"`
-	RunID      string     `json:"run_id"`
-	EventID    string     `json:"event_id"`
-	EventType  string     `json:"event_type"`
-	Reason     string     `json:"reason"`
-	ReceivedAt time.Time  `json:"received_at"`
-	Envelope   []byte     `json:"envelope,omitempty"`
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id"`
+	EventID    string    `json:"event_id"`
+	EventType  string    `json:"event_type"`
+	Reason     string    `json:"reason"`
+	ReceivedAt time.Time `json:"received_at"`
+	Envelope   []byte    `json:"envelope,omitempty"`
 }
 
 func scanRejectedEvent(row pgx.Row) (*RejectedEvent, error) {

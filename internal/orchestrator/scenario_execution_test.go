@@ -631,7 +631,6 @@ func TestWorkerRestartRecoversWithoutDuplicate(t *testing.T) {
 	}
 }
 
-
 func TestStateSnapshotsCapturedForDelivery(t *testing.T) {
 	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, duplicateDeliveryFixture)
 
@@ -679,7 +678,6 @@ func TestStateSnapshotsCapturedForDelivery(t *testing.T) {
 		t.Fatalf("expected both before and after snapshots, got before=%d after=%d", beforeCount, afterCount)
 	}
 }
-
 
 func TestNotEvaluatedOnExecutionFailure(t *testing.T) {
 	o, st, _ := newScenarioExecutor(t, sampleconsumer.ModeSafe, unknownEventFixture)
@@ -741,5 +739,3 @@ func TestNotEvaluatedForUndeclaredRules(t *testing.T) {
 		}
 	}
 }
-
-

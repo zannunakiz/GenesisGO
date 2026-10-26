@@ -7,13 +7,14 @@ import (
 	"testing"
 )
 
-// builtinKeys are the five scenarios the validation gate requires.
+// builtinKeys are the scenarios the validation gate requires.
 var builtinKeys = []string{
+	"crash_after_commit_before_ack",
 	"duplicate_delivery",
+	"normal_payment",
 	"out_of_order",
 	"retry_after_timeout",
 	"worker_restart",
-	"crash_after_commit_before_ack",
 }
 
 func fixtureDir(t *testing.T) string {
@@ -105,10 +106,10 @@ func TestValidateRejectsUnknownStepType(t *testing.T) {
 
 func TestValidateRejectsOversizedParameters(t *testing.T) {
 	s := Scenario{
-		Key:      "ok_key",
-		Version:  1,
-		Name:     "x",
-		Steps:    []Step{{ID: "s1", Type: "publish", EventID: "e1"}},
+		Key:        "ok_key",
+		Version:    1,
+		Name:       "x",
+		Steps:      []Step{{ID: "s1", Type: "publish", EventID: "e1"}},
 		Parameters: Parameters{MaxEvents: 99999, MaxRetries: 3, TimeoutMs: 15000, Concurrency: 1},
 	}
 	if err := Validate(s); err == nil {

@@ -20,11 +20,11 @@ type Event struct {
 
 // Lifecycle event types.
 const (
-	EventRunStarted     = "run.started"
-	EventEventDelivered = "event.delivered"
-	EventConsumerRetry  = "consumer.retrying"
+	EventRunStarted      = "run.started"
+	EventEventDelivered  = "event.delivered"
+	EventConsumerRetry   = "consumer.retrying"
 	EventInvariantFailed = "invariant.failed"
-	EventRunCompleted   = "run.completed"
+	EventRunCompleted    = "run.completed"
 )
 
 // Hub manages run-scoped SSE event distribution. It is safe for concurrent
@@ -42,9 +42,9 @@ type runHub struct {
 	clients map[chan Event]struct{}
 	buffer  []Event // ring buffer of recent events
 	maxBuf  int
-	head    int     // next write index
-	count   int     // number of valid entries
-	seq     uint64  // monotonically increasing event sequence
+	head    int    // next write index
+	count   int    // number of valid entries
+	seq     uint64 // monotonically increasing event sequence
 }
 
 // NewHub creates a hub with the given per-run buffer size.
