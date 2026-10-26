@@ -220,3 +220,143 @@ func TestResultsStableAcrossRuns(t *testing.T) {
 	}
 }
 
+// Table-driven ordering test: sequence of effects determines whether the
+// allowed_order_transition invariant passes or fails.
+func TestAllowedOrderTransitionTableDriven(t *testing.T) {
+	a100 := int64(100)
+	m100 := int64(-100)
+	a200 := int64(200)
+
+	cases := []struct {
+		name    string
+		effects []EffectRecord
+		want    Status
+	}{
+		{
+			name: "create then fulfill is valid",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &a100, nil, baseTime()),
+				effect("e2", "run-1", "order", "order-1", &m100, nil, baseTime().Add(time.Second)),
+			},
+			want: StatusPass,
+		},
+		{
+			name: "create then cancel is valid",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &a100, nil, baseTime()),
+				effect("e2", "run-1", "order", "order-1", &m100, nil, baseTime().Add(time.Second)),
+			},
+			want: StatusPass,
+		},
+		{
+			name: "fulfill before create is invalid",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &m100, nil, baseTime()),
+				effect("e2", "run-1", "order", "order-1", &a100, nil, baseTime().Add(time.Second)),
+			},
+			want: StatusFail,
+		},
+		{
+			name: "cancel then create is invalid",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &m100, nil, baseTime()),
+				effect("e2", "run-1", "order", "order-1", &a200, nil, baseTime().Add(time.Second)),
+			},
+			want: StatusFail,
+		},
+		{
+			name: "create then create is valid (no non-positive yet)",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &a100, nil, baseTime()),
+				effect("e2", "run-1", "order", "order-1", &a200, nil, baseTime().Add(time.Second)),
+			},
+			want: StatusPass,
+		},
+		{
+			name: "single create is valid",
+			effects: []EffectRecord{
+				effect("e1", "run-1", "order", "order-1", &a100, nil, baseTime()),
+			},
+			want: StatusPass,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := NewEngine()
+			eng.Register(allowedOrderTransitionRule{})
+			ev := Evidence{RunID: "run-1", Effects: tc.effects}
+			res := resultByKey(eng.EvaluateAll(context.Background(), ev), RuleAllowedOrderTransition)
+			if res.Status != tc.want {
+				t.Fatalf("expected %s, got %s: %s", tc.want, res.Status, res.Actual)
+			}
+		})
+	}
+}
+
+// TestSafeConsumerSatisfiesAllInvariants simulates a safe consumer producing
+// idempotent effects and verifies all four invariants pass.
+func TestSafeConsumerSatisfiesAllInvariants(t *testing.T) {
+	eng := NewEngine()
+	for _, r := range DefaultRules() {
+		eng.Register(r)
+	}
+	a100 := int64(100)
+	ev := Evidence{
+		RunID: "run-safe",
+		Effects: []EffectRecord{
+			effect("e1", "run-safe", "payment", "order-1", &a100, ptrString("pay-1"), baseTime()),
+			// Duplicate replay in safe mode: skipped, no second effect.
+			effect("e2", "run-safe", "inventory", "sku-1", &a100, nil, baseTime().Add(time.Second)),
+		},
+	}
+	results := eng.EvaluateAll(context.Background(), ev)
+	for _, res := range results {
+		if res.Status != StatusPass {
+			t.Fatalf("safe consumer: invariant %s unexpectedly %s: %s", res.InvariantKey, res.Status, res.Actual)
+		}
+	}
+}
+
+// TestUnsafeConsumerTriggersExpectedInvariantFailure simulates an unsafe
+// consumer producing duplicate effects and verifies the expected invariant
+// fails while others may still pass.
+func TestUnsafeConsumerTriggersExpectedInvariantFailure(t *testing.T) {
+	eng := NewEngine()
+	for _, r := range DefaultRules() {
+		eng.Register(r)
+	}
+	a100 := int64(100)
+	ev := Evidence{
+		RunID: "run-unsafe",
+		Effects: []EffectRecord{
+			effect("e1", "run-unsafe", "payment", "order-1", &a100, ptrString("pay-1"), baseTime()),
+			// Unsafe mode replays the same idempotency key, creating a duplicate.
+			effect("e2", "run-unsafe", "payment", "order-1", &a100, ptrString("pay-1"), baseTime().Add(time.Second)),
+		},
+	}
+	results := eng.EvaluateAll(context.Background(), ev)
+
+	// no_duplicate_effect must fail due to duplicate payment effect.
+	dup := resultByKey(results, RuleNoDuplicateEffect)
+	if dup.Status != StatusFail {
+		t.Fatalf("expected no_duplicate_effect to fail for unsafe consumer, got %s", dup.Status)
+	}
+
+	// idempotency_key_unique must also fail due to repeated idempotency key.
+	idem := resultByKey(results, RuleIdempotencyKeyUnique)
+	if idem.Status != StatusFail {
+		t.Fatalf("expected idempotency_key_unique to fail for unsafe consumer, got %s", idem.Status)
+	}
+
+	// At least one invariant must fail (the whole point of the unsafe fixture).
+	anyFailed := false
+	for _, res := range results {
+		if res.Status == StatusFail {
+			anyFailed = true
+		}
+	}
+	if !anyFailed {
+		t.Fatal("expected at least one invariant to fail for unsafe consumer")
+	}
+}

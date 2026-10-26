@@ -301,3 +301,46 @@ func TestProductionRequiresExplicitSafeConfiguration(t *testing.T) {
 		t.Fatalf("expected production environment, got %q", cfg.Environment)
 	}
 }
+
+// TestProductionRejectsDisabledAuth ensures no default credentials work in
+// production mode: API keys must be enabled and demo auth must be off.
+func TestProductionRejectsDisabledAuth(t *testing.T) {
+	cases := []struct {
+		name    string
+		values  map[string]string
+		wantErr string
+	}{
+		{
+			name: "api keys disabled in production",
+			values: map[string]string{
+				"APP_ENV":          "production",
+				"API_KEYS_ENABLED": "false",
+				"DATABASE_URL":     "postgres://localhost:5432/gg?sslmode=disable",
+				"NATS_URL":         "nats://127.0.0.1:4222",
+			},
+			wantErr: "API_KEYS_ENABLED must be true in production",
+		},
+		{
+			name: "demo auth disabled in production",
+			values: map[string]string{
+				"APP_ENV":            "production",
+				"API_KEYS_ENABLED":   "true",
+				"DEMO_AUTH_DISABLED": "true",
+				"DATABASE_URL":       "postgres://localhost:5432/gg?sslmode=disable",
+				"NATS_URL":           "nats://127.0.0.1:4222",
+			},
+			wantErr: "DEMO_AUTH_DISABLED must be false in production",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := from(tt.values)
+			if err == nil {
+				t.Fatalf("expected error for %s", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}

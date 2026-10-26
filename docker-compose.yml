@@ -1,9 +1,14 @@
 services:
-  # --- Core stack (default profile; works without monitoring) ---
+  # --------------------------------------------------------------------------
+  # Core stack: docker compose --profile core up -d   (see Makefile compose-up)
+  # --------------------------------------------------------------------------
   postgres:
+    profiles: ["core"]
     image: postgres:15-alpine
     ports:
-      - "127.0.0.1:5432:5432"
+      # 127.0.0.1 only. Remap the host port via POSTGRES_HOST_PORT if it is
+      # already taken locally (e.g. another local Postgres on Windows).
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: genesisgo
       POSTGRES_USER: genesisgo
@@ -15,13 +20,17 @@ services:
       interval: 5s
       timeout: 2s
       retries: 10
+    stop_grace_period: 10s
 
   nats:
+    profiles: ["core"]
     image: nats:2.10-alpine
     ports:
       - "127.0.0.1:4222:4222"
+    stop_grace_period: 10s
 
   api:
+    profiles: ["core"]
     build:
       context: .
       dockerfile: Dockerfile
@@ -29,6 +38,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:9092:9090"
+    user: "1000:1000"
     environment:
       DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
       NATS_URL: nats://nats:4222
@@ -37,6 +47,7 @@ services:
       TELEMETRY_ENDPOINT: http://otel-collector:4318
       LOG_LEVEL: info
       API_KEYS_ENABLED: "true"
+      OLLAMA_URL: ${OLLAMA_URL:-}
       RETENTION_PERIOD: 24h
       MAX_RUNS: "1000"
     depends_on:
@@ -44,27 +55,44 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+    stop_grace_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
 
   worker:
+    profiles: ["core"]
     build:
       context: .
       dockerfile: Dockerfile
       target: worker
+    user: "1000:1000"
     environment:
       DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
       NATS_URL: nats://nats:4222
       LOG_LEVEL: info
+      OLLAMA_URL: ${OLLAMA_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
       nats:
         condition: service_started
+    stop_grace_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   sample-consumer:
+    profiles: ["core"]
     build:
       context: .
       dockerfile: Dockerfile
       target: sample-consumer
+    user: "1000:1000"
     environment:
       DATABASE_URL: postgres://genesisgo:${POSTGRES_PASSWORD:-genesisgo}@postgres:5432/genesisgo?sslmode=disable
       NATS_URL: nats://nats:4222
@@ -74,10 +102,62 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+    stop_grace_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
-  # --- Observability profile (opt-in): docker compose --profile observability up -d ---
-  # All published ports below bind to 127.0.0.1 only; nothing is exposed publicly.
+  web:
+    profiles: ["core"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    ports:
+      - "127.0.0.1:3000:3000"
+    user: "1000:1000"
+    environment:
+      GENESISGO_API_URL: http://127.0.0.1:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    stop_grace_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
+  # --------------------------------------------------------------------------
+  # AI profile (opt-in): docker compose --profile ai up -d
+  # Local Ollama only; API connects via OLLAMA_URL. Offline by default.
+  # --------------------------------------------------------------------------
+  ollama:
+    profiles: ["ai"]
+    image: ollama/ollama:0.5.7
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      OLLAMA_MODELS: /root/.ollama/models
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:11434/api/version || exit 1"]
+      interval: 10s
+      timeout: 2s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # --------------------------------------------------------------------------
+  # Observability profile (opt-in): docker compose --profile observability up -d
+  # All published ports bind to 127.0.0.1 only; nothing is exposed publicly.
+  # --------------------------------------------------------------------------
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.119.0
     profiles: ["observability"]
@@ -156,6 +236,7 @@ services:
 
 volumes:
   postgres-data:
+  ollama-data:
   prometheus-data:
   grafana-data:
   tempo-data:
