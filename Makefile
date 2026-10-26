@@ -38,7 +38,7 @@ web-build:
 	$(NPM) --prefix web run build
 
 compose-up:
-	docker compose up -d
+	docker compose --profile core up -d
 
 compose-down:
 	docker compose down
