@@ -22,10 +22,10 @@ type fakeReportStore struct {
 
 func newFakeReportStore() *fakeReportStore {
 	return &fakeReportStore{
-		runs:      make(map[string]*store.Run),
-		scenarios: make(map[string]*store.Scenario),
-		attempts:  make(map[string][]*store.EventAttempt),
-		snapshots: make(map[string][]*store.StateSnapshot),
+		runs:       make(map[string]*store.Run),
+		scenarios:  make(map[string]*store.Scenario),
+		attempts:   make(map[string][]*store.EventAttempt),
+		snapshots:  make(map[string][]*store.StateSnapshot),
 		invariants: make(map[string][]*store.InvariantResult),
 	}
 }
@@ -84,15 +84,15 @@ func TestGenerateReport(t *testing.T) {
 	completedAt := now.Add(2 * time.Minute)
 
 	st.runs[runID] = &store.Run{
-		ID:             runID,
-		ScenarioID:     scenarioID,
-		Status:         string(store.RunStateCompleted),
-		CreatedAt:      now,
-		StartedAt:      &startedAt,
-		CompletedAt:    &completedAt,
-		UpdatedAt:      completedAt,
-		AttemptCount:   1,
-		Version:        1,
+		ID:           runID,
+		ScenarioID:   scenarioID,
+		Status:       string(store.RunStateCompleted),
+		CreatedAt:    now,
+		StartedAt:    &startedAt,
+		CompletedAt:  &completedAt,
+		UpdatedAt:    completedAt,
+		AttemptCount: 1,
+		Version:      1,
 	}
 
 	st.attempts[runID] = []*store.EventAttempt{
@@ -106,13 +106,13 @@ func TestGenerateReport(t *testing.T) {
 			CreatedAt:      now.Add(30 * time.Second),
 		},
 		{
-			ID:             "attempt-2",
-			RunID:          runID,
-			EventID:        "evt-001",
-			AttemptNumber:  2,
-			DeliveredAt:    now.Add(45 * time.Second),
-			FaultInjected:  strPtr("crash_after_commit"),
-			CreatedAt:      now.Add(45 * time.Second),
+			ID:            "attempt-2",
+			RunID:         runID,
+			EventID:       "evt-001",
+			AttemptNumber: 2,
+			DeliveredAt:   now.Add(45 * time.Second),
+			FaultInjected: strPtr("crash_after_commit"),
+			CreatedAt:     now.Add(45 * time.Second),
 		},
 	}
 
@@ -225,15 +225,15 @@ func TestGenerateReportDeterministic(t *testing.T) {
 	}
 
 	st.runs[runID] = &store.Run{
-		ID:             runID,
-		ScenarioID:     scenarioID,
-		Status:         string(store.RunStateCompleted),
-		CreatedAt:      now,
-		StartedAt:      &startedAt,
-		CompletedAt:    &completedAt,
-		UpdatedAt:      completedAt,
-		AttemptCount:   1,
-		Version:        1,
+		ID:           runID,
+		ScenarioID:   scenarioID,
+		Status:       string(store.RunStateCompleted),
+		CreatedAt:    now,
+		StartedAt:    &startedAt,
+		CompletedAt:  &completedAt,
+		UpdatedAt:    completedAt,
+		AttemptCount: 1,
+		Version:      1,
 	}
 
 	st.attempts[runID] = []*store.EventAttempt{
@@ -300,21 +300,21 @@ func TestGenerateReportNoSensitiveData(t *testing.T) {
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 
 	st.scenarios[scenarioID] = &store.Scenario{
-		ID:          scenarioID,
-		Key:         "test",
-		Name:        "Test",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:        scenarioID,
+		Key:       "test",
+		Name:      "Test",
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	st.runs[runID] = &store.Run{
-		ID:          runID,
-		ScenarioID:  scenarioID,
-		Status:      string(store.RunStateCompleted),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           runID,
+		ScenarioID:   scenarioID,
+		Status:       string(store.RunStateCompleted),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 
 	st.attempts[runID] = []*store.EventAttempt{
@@ -357,21 +357,21 @@ func TestAllVerdictStates(t *testing.T) {
 	now := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
 
 	st.scenarios[scenarioID] = &store.Scenario{
-		ID:          scenarioID,
-		Key:         "test",
-		Name:        "Test",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:        scenarioID,
+		Key:       "test",
+		Name:      "Test",
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	st.runs[runID] = &store.Run{
-		ID:          runID,
-		ScenarioID:  scenarioID,
-		Status:      string(store.RunStateCompleted),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           runID,
+		ScenarioID:   scenarioID,
+		Status:       string(store.RunStateCompleted),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 		AttemptCount: 1,
-		Version:     1,
+		Version:      1,
 	}
 
 	st.invariants[runID] = []*store.InvariantResult{
@@ -433,4 +433,3 @@ func containsStr(s, substr string) bool {
 }
 
 var _ = sort.Strings
-

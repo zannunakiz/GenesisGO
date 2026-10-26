@@ -10,13 +10,13 @@ import (
 // RejectedEvent records an envelope that failed validation and was rejected.
 // It is persisted for audit so invalid events are never silently dropped.
 type RejectedEvent struct {
-	ID         string     `json:"id"`
-	RunID      string     `json:"run_id"`
-	EventID    string     `json:"event_id"`
-	EventType  string     `json:"event_type"`
-	Reason     string     `json:"reason"`
-	ReceivedAt time.Time  `json:"received_at"`
-	Envelope   []byte     `json:"envelope,omitempty"`
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id"`
+	EventID    string    `json:"event_id"`
+	EventType  string    `json:"event_type"`
+	Reason     string    `json:"reason"`
+	ReceivedAt time.Time `json:"received_at"`
+	Envelope   []byte    `json:"envelope,omitempty"`
 }
 
 // Recorder records rejected events for audit. Implementations must be safe for
@@ -49,21 +49,21 @@ func FormatReason(field, reason string) string {
 // values beyond what is already in the envelope.
 func MarshalRejection(r Rejection) ([]byte, error) {
 	record := struct {
-		EventID        string    `json:"event_id"`
-		EventType      string    `json:"event_type"`
-		SchemaVersion  int       `json:"schema_version"`
-		RunID          string    `json:"run_id"`
-		OccurredAt     time.Time `json:"occurred_at"`
-		Reason         string    `json:"reason"`
-		ReceivedAt     time.Time `json:"received_at"`
+		EventID       string    `json:"event_id"`
+		EventType     string    `json:"event_type"`
+		SchemaVersion int       `json:"schema_version"`
+		RunID         string    `json:"run_id"`
+		OccurredAt    time.Time `json:"occurred_at"`
+		Reason        string    `json:"reason"`
+		ReceivedAt    time.Time `json:"received_at"`
 	}{
-		EventID:        r.Envelope.EventID,
-		EventType:      string(r.Envelope.EventType),
-		SchemaVersion:  r.Envelope.SchemaVersion,
-		RunID:          r.Envelope.RunID,
-		OccurredAt:     r.Envelope.OccurredAt,
-		Reason:         r.Reason,
-		ReceivedAt:     time.Now().UTC(),
+		EventID:       r.Envelope.EventID,
+		EventType:     string(r.Envelope.EventType),
+		SchemaVersion: r.Envelope.SchemaVersion,
+		RunID:         r.Envelope.RunID,
+		OccurredAt:    r.Envelope.OccurredAt,
+		Reason:        r.Reason,
+		ReceivedAt:    time.Now().UTC(),
 	}
 	return json.Marshal(record)
 }

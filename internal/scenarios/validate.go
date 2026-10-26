@@ -8,12 +8,12 @@ import (
 
 // Validation error sentinels.
 var (
-	ErrInvalidScenario   = errors.New("invalid scenario")
-	ErrInvalidKey        = errors.New("invalid scenario key")
-	ErrInvalidVersion    = errors.New("invalid scenario version")
-	ErrInvalidStep       = errors.New("invalid scenario step")
-	ErrInvalidParameter  = errors.New("invalid scenario parameter")
-	ErrInvalidInvariant  = errors.New("invalid scenario invariant")
+	ErrInvalidScenario  = errors.New("invalid scenario")
+	ErrInvalidKey       = errors.New("invalid scenario key")
+	ErrInvalidVersion   = errors.New("invalid scenario version")
+	ErrInvalidStep      = errors.New("invalid scenario step")
+	ErrInvalidParameter = errors.New("invalid scenario parameter")
+	ErrInvalidInvariant = errors.New("invalid scenario invariant")
 )
 
 // Validation limits.

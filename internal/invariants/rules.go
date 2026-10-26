@@ -8,10 +8,10 @@ import (
 
 // Rule keys (stable across runs; used as invariant keys in scenarios).
 const (
-	RuleNoDuplicateEffect        = "no_duplicate_effect"
-	RuleNoNegativeInventory      = "no_negative_inventory"
-	RuleIdempotencyKeyUnique     = "idempotency_key_unique"
-	RuleAllowedOrderTransition   = "allowed_order_transition"
+	RuleNoDuplicateEffect      = "no_duplicate_effect"
+	RuleNoNegativeInventory    = "no_negative_inventory"
+	RuleIdempotencyKeyUnique   = "idempotency_key_unique"
+	RuleAllowedOrderTransition = "allowed_order_transition"
 )
 
 // noDuplicateEffectRule: one event must not create duplicate successful effects.
@@ -117,6 +117,7 @@ func (r noNegativeInventoryRule) Evaluate(_ context.Context, ev Evidence) (*Resu
 		Evidence:     evidence,
 	}, nil
 }
+
 // idempotencyKeyUniqueRule: a repeated idempotency key must not create an extra effect.
 type idempotencyKeyUniqueRule struct{}
 
@@ -239,4 +240,3 @@ func DefaultRules() []Rule {
 		allowedOrderTransitionRule{},
 	}
 }
-

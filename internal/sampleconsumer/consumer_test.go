@@ -176,6 +176,7 @@ func TestSafeModeDifferentIdemKeysCreateSeparateEffects(t *testing.T) {
 		t.Fatalf("expected 2 effects for different idempotency keys, got %d", countEffects(ledger, "run-1"))
 	}
 }
+
 // ---------------------------------------------------------------------------
 // Unsafe demo mode
 // ---------------------------------------------------------------------------
@@ -279,4 +280,3 @@ func TestProcessRejectsUnsupportedEventType(t *testing.T) {
 // Ensure events and errors packages are referenced.
 var _ = events.EventTypePayment
 var _ = errors.New
-

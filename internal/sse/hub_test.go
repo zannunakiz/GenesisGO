@@ -13,9 +13,9 @@ func TestHubPublishAndSubscribe(t *testing.T) {
 	ch := hub.Subscribe("run-1", "")
 
 	hub.Publish("run-1", Event{
-		Type: EventRunStarted,
+		Type:  EventRunStarted,
 		RunID: "run-1",
-		Data: map[string]string{"status": "queued"},
+		Data:  map[string]string{"status": "queued"},
 	})
 
 	select {

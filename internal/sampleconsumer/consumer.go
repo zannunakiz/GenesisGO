@@ -217,7 +217,6 @@ var errContextCrashed = errors.New("consumer crashed after commit before ack")
 func IsCrashAfterCommit(err error) bool {
 	return errors.Is(err, errContextCrashed)
 }
+
 // Compile-time check that *store.Store satisfies Ledger.
 var _ Ledger = (*store.Store)(nil)
-
-
