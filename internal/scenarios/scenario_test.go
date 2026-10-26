@@ -7,13 +7,14 @@ import (
 	"testing"
 )
 
-// builtinKeys are the five scenarios the validation gate requires.
+// builtinKeys are the scenarios the validation gate requires.
 var builtinKeys = []string{
+	"crash_after_commit_before_ack",
 	"duplicate_delivery",
+	"normal_payment",
 	"out_of_order",
 	"retry_after_timeout",
 	"worker_restart",
-	"crash_after_commit_before_ack",
 }
 
 func fixtureDir(t *testing.T) string {
