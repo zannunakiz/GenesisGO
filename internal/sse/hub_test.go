@@ -90,12 +90,13 @@ func TestHubBoundedBuffer(t *testing.T) {
 	ch := hub.Subscribe("run-1", "e1")
 
 	received := []string{}
+Outer:
 	for i := 0; i < 2; i++ {
 		select {
 		case ev := <-ch:
 			received = append(received, ev.ID)
 		case <-time.After(2 * time.Second):
-			break
+			break Outer
 		}
 	}
 	if len(received) != 2 {

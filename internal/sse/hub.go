@@ -175,9 +175,3 @@ func (h *Hub) Close() {
 	h.runs = make(map[string]*runHub)
 	h.mu.Unlock()
 }
-
-// nextID generates a best-effort unique id without crypto/rand to keep this
-// package dependency-light. Collisions are extremely unlikely in practice.
-func nextID() string {
-	return time.Now().UTC().Format("15:04:05.000000")
-}

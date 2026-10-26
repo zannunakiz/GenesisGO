@@ -94,10 +94,10 @@ func TestOllamaSuccessfulDiagnosis(t *testing.T) {
 	if len(res.SuggestedFollowUpScenarios) != 2 {
 		t.Fatalf("expected 2 follow-up scenarios, got %d", len(res.SuggestedFollowUpScenarios))
 	}
-	if res.ProbableCauses == nil || len(res.ProbableCauses) == 0 {
+	if len(res.ProbableCauses) == 0 {
 		t.Fatal("expected probable causes")
 	}
-	if res.CitedEvidenceIDs == nil || len(res.CitedEvidenceIDs) == 0 {
+	if len(res.CitedEvidenceIDs) == 0 {
 		t.Fatal("expected cited evidence ids")
 	}
 	if res.ConfidenceRationale == nil || *res.ConfidenceRationale == "" {

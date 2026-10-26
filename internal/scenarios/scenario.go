@@ -96,16 +96,6 @@ func validKey(key string) bool {
 	return true
 }
 
-// defaultParameters returns safe bounded defaults.
-func defaultParameters() Parameters {
-	return Parameters{
-		MaxEvents:   10,
-		MaxRetries:  3,
-		TimeoutMs:   30000,
-		Concurrency: 1,
-	}
-}
-
 // loadDir reads all *.json files from dir and returns parsed scenarios.
 func loadDir(dir string) ([]Scenario, error) {
 	entries, err := os.ReadDir(dir)
