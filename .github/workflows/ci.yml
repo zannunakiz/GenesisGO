@@ -81,7 +81,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Filesystem scan (vulnerabilities, secrets, config)
-        uses: aquasecurity/trivy-action@v0.33.0
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -98,7 +98,7 @@ jobs:
           docker build --target sample-consumer -t genesisgo:ci-sample-consumer .
           docker build --target web -t genesisgo:ci-web .
       - name: Image vulnerability scan (api)
-        uses: aquasecurity/trivy-action@v0.33.0
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
           scan-type: 'image'
           image-ref: 'genesisgo:ci-api'
