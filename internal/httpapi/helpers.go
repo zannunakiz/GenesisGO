@@ -24,3 +24,10 @@ func (w *timeoutWriter) Write(b []byte) (int, error) {
 	w.wroteHeader.Store(true)
 	return w.ResponseWriter.Write(b)
 }
+
+func (w *timeoutWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		w.wroteHeader.Store(true)
+		flusher.Flush()
+	}
+}

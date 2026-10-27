@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,7 +45,7 @@ const (
 	execTimeout  = 60 * time.Second
 	sseWait      = 8 * time.Second
 	sseRead      = 5 * time.Second
-	fixtureDir   = "internal/scenarios/fixtures"
+	fixtureDir   = "../scenarios/fixtures"
 )
 
 // passFixture is a single-idempotent-payment scenario exercised independently
@@ -120,6 +122,7 @@ func newIntegrationStack(t *testing.T) *integrationStack {
 			},
 			WaitingFor: wait.ForLog("database system is ready to accept connections"),
 		},
+		Started: true,
 	})
 	if err != nil {
 		t.Skipf("skipping integration test: cannot start PostgreSQL container (is Docker running?): %v", err)
@@ -133,20 +136,22 @@ func newIntegrationStack(t *testing.T) *integrationStack {
 	natsC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        natsImage,
+			Cmd:          []string{"-js"},
 			ExposedPorts: []string{"4222/tcp"},
 			WaitingFor:   wait.ForListeningPort("4222/tcp"),
 		},
+		Started: true,
 	})
 	if err != nil {
 		t.Skipf("skipping integration test: cannot start NATS container (is Docker running?): %v", err)
 	}
 	s.nats = natsC
 
-	pgEndpoint, err := pg.Endpoint(ctx, "5432/tcp")
+	pgEndpoint, err := pg.PortEndpoint(ctx, "5432/tcp", "tcp")
 	if err != nil {
 		t.Fatalf("postgres endpoint: %v", err)
 	}
-	dsn := fmt.Sprintf("postgres://genesisgo:genesisgo@%s/genesisgo?sslmode=disable", pgEndpoint)
+	dsn := fmt.Sprintf("postgres://genesisgo:genesisgo@%s/genesisgo?sslmode=disable", endpointHostPort(t, pgEndpoint))
 
 	pool, err := store.NewPool(context.Background(), dsn)
 	if err != nil {
@@ -165,19 +170,31 @@ func newIntegrationStack(t *testing.T) *integrationStack {
 	s.pool = pool
 	s.store = store.NewStore(pool)
 
-	if err := applyMigrations(context.Background(), pool, "migrations"); err != nil {
+	if err := applyMigrations(context.Background(), pool, "../../migrations"); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
-	natEndpoint, err := natsC.Endpoint(ctx, "4222/tcp")
+	natEndpoint, err := natsC.PortEndpoint(ctx, "4222/tcp", "tcp")
 	if err != nil {
 		t.Fatalf("nats endpoint: %v", err)
 	}
-	s.broker, err = newBrokerReady(context.Background(), "nats://"+natEndpoint)
+	s.broker, err = newBrokerReady(context.Background(), "nats://"+endpointHostPort(t, natEndpoint))
 	if err != nil {
 		t.Fatalf("new broker: %v", err)
 	}
 	return s
+}
+
+func endpointHostPort(t *testing.T, endpoint string) string {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("parse container endpoint %q: %v", endpoint, err)
+	}
+	if parsed.Host == "" {
+		t.Fatalf("container endpoint %q has no host", endpoint)
+	}
+	return parsed.Host
 }
 
 func newBrokerReady(ctx context.Context, url string) (broker.Broker, error) {
@@ -186,7 +203,7 @@ func newBrokerReady(ctx context.Context, url string) (broker.Broker, error) {
 	for i := 0; i < 20; i++ {
 		brk, err = broker.New(broker.Config{
 			URL:           url,
-			Stream:        "genesisgo.events",
+			Stream:        "genesisgo-events",
 			SubjectPrefix: "gg.run.it",
 			MaxDeliver:    5,
 			MaxAckPending: 1000,
@@ -552,8 +569,15 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 	authHeader := func(req *http.Request) {
 		req.Header.Set("Authorization", "Bearer "+generated.Secret)
 	}
+	newClientRequest := func(method, target string, body io.Reader) *http.Request {
+		req, err := http.NewRequest(method, target, body)
+		if err != nil {
+			t.Fatalf("create %s request: %v", method, err)
+		}
+		return req
+	}
 
-	req := httptest.NewRequest(http.MethodPost, srv.URL+"/api/v1/runs",
+	req := newClientRequest(http.MethodPost, srv.URL+"/api/v1/runs",
 		strings.NewReader(`{"scenario_key":"duplicate_delivery"}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
@@ -565,7 +589,7 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	req = httptest.NewRequest(http.MethodPost, srv.URL+"/api/v1/runs",
+	req = newClientRequest(http.MethodPost, srv.URL+"/api/v1/runs",
 		strings.NewReader(`{"scenario_key":"duplicate_delivery"}`))
 	req.Header.Set("Content-Type", "application/json")
 	authHeader(req)
@@ -595,7 +619,7 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 		t.Fatalf("execute run: %v", err)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID, nil)
+	req = newClientRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID, nil)
 	authHeader(req)
 	resp, err = client.Do(req)
 	if err != nil {
@@ -617,7 +641,7 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 		t.Fatalf("run id mismatch: %q != %q", gotRun.Run.ID, runID)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID+"/report", nil)
+	req = newClientRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID+"/report", nil)
 	authHeader(req)
 	resp, err = client.Do(req)
 	if err != nil {
@@ -639,7 +663,7 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 		t.Fatalf("report run id mismatch: %q != %q", rep.Run.ID, runID)
 	}
 
-	req = httptest.NewRequest(http.MethodGet,
+	req = newClientRequest(http.MethodGet,
 		srv.URL+"/api/v1/runs/00000000-0000-0000-0000-000000000000/report", nil)
 	authHeader(req)
 	resp, err = client.Do(req)
@@ -655,7 +679,7 @@ func TestIntegrationRESTAPIAndSSEStream(t *testing.T) {
 		resp *http.Response
 		err  error
 	}
-	sseReq := httptest.NewRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID+"/events", nil)
+	sseReq := newClientRequest(http.MethodGet, srv.URL+"/api/v1/runs/"+runID+"/events", nil)
 	authHeader(sseReq)
 	delivered := make(chan sseResult, 1)
 	go func() {

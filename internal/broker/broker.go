@@ -31,7 +31,7 @@ import (
 
 // Defaults for the JetStream stream and durable consumers.
 const (
-	defaultStream         = "genesisgo.events"
+	defaultStream         = "genesisgo-events"
 	defaultSubjectPrefix  = "gg.run"
 	defaultMaxAge         = 1 * time.Hour
 	defaultMaxMsgs        = 1_000_000

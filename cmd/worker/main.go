@@ -51,7 +51,7 @@ func run(ctx context.Context) error {
 
 	brk, err := broker.New(broker.Config{
 		URL:           cfg.NATSURL,
-		Stream:        "genesisgo.events",
+		Stream:        "genesisgo-events",
 		SubjectPrefix: "gg.run",
 		MaxAge:        time.Hour,
 		MaxDeliver:    5,
