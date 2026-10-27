@@ -81,16 +81,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Filesystem scan (vulnerabilities, secrets, config)
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-          ignore-unfixed: 'true'
-          scanners: 'vuln,secret,config'
-          skip-dirs: 'node_modules,.next,.git'
-          skip-files: '.env.example'
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work:ro" \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            -w /work \
+            aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436 \
+            fs \
+            --scanners vuln,secret,misconfig \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --skip-dirs node_modules,.next,.git \
+            --skip-files .env.example .
       - name: Build Docker images
         run: |
           docker build --target api -t genesisgo:ci-api .
@@ -98,25 +101,36 @@ jobs:
           docker build --target sample-consumer -t genesisgo:ci-sample-consumer .
           docker build --target web -t genesisgo:ci-web .
       - name: Image vulnerability scan (api)
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          scan-type: 'image'
-          image-ref: 'genesisgo:ci-api'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-          ignore-unfixed: 'true'
-          scanners: 'vuln'
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436 \
+            image \
+            --scanners vuln \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            --ignore-unfixed \
+            genesisgo:ci-api
       - name: Configuration scan (misconfiguration)
-        uses: aquasecurity/trivy-action@v0.33.0
-        with:
-          scan-type: 'config'
-          scan-ref: '.'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work:ro" \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            -w /work \
+            aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436 \
+            config \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            .
       - name: Generate SBOM (api image, CycloneDX)
-        uses: aquasecurity/trivy-action@v0.33.0
-        with:
-          scan-type: 'sbom'
-          image-ref: 'genesisgo:ci-api'
-          format: 'cyclonedx'
-          output: 'sbom-api.cyclonedx.json'
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" \
+            aquasec/trivy@sha256:a22415a38938a56c379387a8163fcb0ce38b10ace73e593475d3658d578b2436 \
+            image \
+            --format cyclonedx \
+            --output /work/sbom-api.cyclonedx.json \
+            genesisgo:ci-api
